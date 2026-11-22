@@ -1,0 +1,41 @@
+{
+	"schemaVersion": 1,
+	"id": "world-gdrive-sync",
+	"version": "${version}",
+	"name": "World-GDrive-Sync",
+	"description": "This is an example description! Tell everyone what your mod is about!",
+	"authors": [
+		"Me!"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/world-gdrive-sync/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"net.aii3n.worldgdrivesync.WorldGDriveSync"
+		],
+		"client": [
+			"net.aii3n.worldgdrivesync.client.WorldGDriveSyncClient"
+		],
+		"fabric-datagen": [
+			"net.aii3n.worldgdrivesync.client.WorldGDriveSyncDataGenerator"
+		]
+	},
+	"mixins": [
+		"world-gdrive-sync.mixins.json",
+		{
+			"config": "world-gdrive-sync.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
