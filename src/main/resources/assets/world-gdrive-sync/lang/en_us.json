@@ -40,5 +40,8 @@
 	"world-gdrive-sync.settings.waitingForBrowser": "Sign in to the shared Google account in your web browser, then come back here. If the browser didn't open, copy the link and paste it into your browser.",
 	"world-gdrive-sync.settings.copyLink": "Copy Sign-in Link",
 	"world-gdrive-sync.settings.signInFailed": "Sign-in failed: %s",
-	"world-gdrive-sync.settings.clientMissing": "This build of the mod has no Google OAuth client configured, so it can't connect."
+	"world-gdrive-sync.settings.clientMissing": "This build of the mod has no Google OAuth client configured, so it can't connect.",
+	"world-gdrive-sync.settings.periodicUpload": "Upload while hosting",
+	"world-gdrive-sync.settings.periodicUpload.minutes": "Every %s min",
+	"world-gdrive-sync.settings.periodicUpload.tooltip": "While you host a Shared World, save it and upload it this often, so a crash loses at most this much progress. The world is always uploaded when you save and quit."
 }
