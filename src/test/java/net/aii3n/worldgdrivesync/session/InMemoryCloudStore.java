@@ -28,6 +28,7 @@ final class InMemoryCloudStore implements CloudStore {
 	private boolean failUploads;
 	private boolean failDownloads;
 	private boolean failMetadataReads;
+	private boolean dropConnectionAfterNextReplace;
 	private Hook beforeNextLockWrite;
 	private Hook beforeNextRestore;
 
@@ -76,24 +77,25 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	@Override
-	public synchronized void writeMetadata(String worldId, WorldMetadata metadata) throws IOException {
-		folder(worldId).metadata = metadata;
-	}
-
-	@Override
-	public synchronized void uploadCurrentSave(String worldId, Path zip, LongConsumer bytesSent) throws IOException {
+	public synchronized void uploadCurrentSave(String worldId, Path zip, WorldMetadata metadata, LongConsumer bytesSent) throws IOException {
 		Folder folder = folder(worldId);
 		folder.currentSave = send(zip, bytesSent);
+		folder.metadata = metadata;
 	}
 
 	@Override
-	public synchronized Backup replaceCurrentSave(String worldId, Path zip, BackupLabel previous, LongConsumer bytesSent) throws IOException {
+	public synchronized Backup replaceCurrentSave(String worldId, Path zip, WorldMetadata next, BackupLabel previous, LongConsumer bytesSent) throws IOException {
 		Folder folder = folder(worldId);
 		if (folder.currentSave == null) throw new IOException("No Current Save in " + worldId + " to replace");
 		byte[] bytes = send(zip, bytesSent);
 		Backup backup = new Backup("backup-" + nextId++, previous);
 		folder.backups.put(backup.id(), new StoredBackup(backup, folder.currentSave));
 		folder.currentSave = bytes;
+		folder.metadata = next;
+		if (dropConnectionAfterNextReplace) {
+			dropConnectionAfterNextReplace = false;
+			throw new IOException("Connection dropped before the answer arrived (simulated)");
+		}
 		return backup;
 	}
 
@@ -112,7 +114,7 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	@Override
-	public synchronized Backup restoreBackup(String worldId, String backupId, BackupLabel previous) throws IOException {
+	public synchronized Backup restoreBackup(String worldId, String backupId, WorldMetadata next, BackupLabel previous) throws IOException {
 		Hook hook = beforeNextRestore;
 		beforeNextRestore = null;
 		if (hook != null) hook.run();
@@ -123,6 +125,7 @@ final class InMemoryCloudStore implements CloudStore {
 		Backup backup = new Backup("backup-" + nextId++, previous);
 		folder.backups.put(backup.id(), new StoredBackup(backup, folder.currentSave));
 		folder.currentSave = chosen.zip();
+		folder.metadata = next;
 		return backup;
 	}
 
@@ -196,6 +199,14 @@ final class InMemoryCloudStore implements CloudStore {
 	/** The connection is back: uploads succeed again after {@link #failUploads}. */
 	void uploadsWork() {
 		failUploads = false;
+	}
+
+	/**
+	 * The next Current Save replacement is stored completely, but then the call fails, as if the
+	 * connection dropped before the answer arrived.
+	 */
+	void dropConnectionAfterNextReplace() {
+		dropConnectionAfterNextReplace = true;
 	}
 
 	/** From now on reading a world's metadata fails, like a dropped connection. */

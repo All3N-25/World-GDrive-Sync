@@ -120,9 +120,8 @@ public final class SessionCoordinator {
 			long size = Files.size(zip);
 
 			CloudWorld world = cloud.createWorld(name);
-			cloud.uploadCurrentSave(world.id(), zip, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 			WorldMetadata metadata = new WorldMetadata(1, clock.instant());
-			cloud.writeMetadata(world.id(), metadata);
+			cloud.uploadCurrentSave(world.id(), zip, metadata, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 
 			new LocalCopyRecord(metadata.revision()).write(staging);
 			Files.move(staging, localCopies.resolve(world.id()));
@@ -466,10 +465,9 @@ public final class SessionCoordinator {
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
 			ensureStillHost(worldId, previous);
 
-			cloud.replaceCurrentSave(worldId, zip, BackupLabel.of(previous),
-					sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
-			cloud.writeMetadata(worldId, next);
+			cloud.replaceCurrentSave(worldId, zip, next, BackupLabel.of(previous),
+					sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 			Path localFolder = localCopies.resolve(worldId);
 			LocalCopyRecord uploaded = LocalCopyRecord.read(localFolder).orElse(new LocalCopyRecord(next.revision()))
 					.withRevision(next.revision()).withPendingUpload(false);
@@ -538,9 +536,8 @@ public final class SessionCoordinator {
 		try {
 			WorldMetadata previous = cloud.readMetadata(worldId)
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-			Backup replaced = cloud.restoreBackup(worldId, backupId, BackupLabel.of(previous));
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
-			cloud.writeMetadata(worldId, next);
+			Backup replaced = cloud.restoreBackup(worldId, backupId, next, BackupLabel.of(previous));
 			pruneBackups(worldId);
 			return new RestoreResult.Restored(next, replaced);
 		} finally {

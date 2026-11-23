@@ -20,27 +20,33 @@ public interface CloudStore {
 	/** Makes a new, empty folder for one Shared World. */
 	CloudWorld createWorld(String name) throws IOException;
 
-	/** The world's metadata, or empty if none has been written yet. */
+	/**
+	 * The Current Save's metadata (its Revision and when it was saved), or empty if the world has no
+	 * Current Save yet.
+	 *
+	 * <p>The metadata is stored with the Current Save itself and changes in the same step that makes
+	 * a zip the Current Save. So it always names the Revision of the zip a download would get, even
+	 * when the call that made it current failed afterwards.
+	 */
 	Optional<WorldMetadata> readMetadata(String worldId) throws IOException;
 
-	void writeMetadata(String worldId, WorldMetadata metadata) throws IOException;
-
 	/**
-	 * Stores {@code zip} as the world's Current Save, replacing any previous one.
+	 * Stores {@code zip} as the world's first Current Save, carrying {@code metadata}.
 	 *
 	 * @param bytesSent told how many bytes of the zip have been sent so far
 	 */
-	void uploadCurrentSave(String worldId, Path zip, LongConsumer bytesSent) throws IOException;
+	void uploadCurrentSave(String worldId, Path zip, WorldMetadata metadata, LongConsumer bytesSent) throws IOException;
 
 	/**
-	 * Stores {@code zip} as the world's new Current Save and moves the previous Current Save into the
-	 * world's Backups, labelled {@code previous}. The previous one stays the Current Save until the
-	 * new zip is fully stored, so a failed upload leaves the Current Save and the Backups as they were.
+	 * Stores {@code zip} as the world's new Current Save, carrying {@code next}, and moves the
+	 * previous Current Save into the world's Backups, labelled {@code previous}. The previous one
+	 * stays the Current Save until the new zip is fully stored, so a failed upload leaves the Current
+	 * Save and the Backups as they were.
 	 *
 	 * @param bytesSent told how many bytes of the zip have been sent so far
 	 * @return the Backup the previous Current Save became
 	 */
-	Backup replaceCurrentSave(String worldId, Path zip, BackupLabel previous, LongConsumer bytesSent) throws IOException;
+	Backup replaceCurrentSave(String worldId, Path zip, WorldMetadata next, BackupLabel previous, LongConsumer bytesSent) throws IOException;
 
 	/**
 	 * Stores {@code zip} straight into the world's Backups, labelled {@code label}, leaving the
@@ -54,13 +60,13 @@ public interface CloudStore {
 	List<Backup> listBackups(String worldId) throws IOException;
 
 	/**
-	 * Makes Backup {@code backupId} the world's Current Save and moves the previous Current Save into
-	 * the world's Backups, labelled {@code previous}. The restored Backup leaves the Backups. Nothing
-	 * is re-uploaded.
+	 * Makes Backup {@code backupId} the world's Current Save, carrying {@code next}, and moves the
+	 * previous Current Save into the world's Backups, labelled {@code previous}. The restored Backup
+	 * leaves the Backups. Nothing is re-uploaded.
 	 *
 	 * @return the Backup the previous Current Save became
 	 */
-	Backup restoreBackup(String worldId, String backupId, BackupLabel previous) throws IOException;
+	Backup restoreBackup(String worldId, String backupId, WorldMetadata next, BackupLabel previous) throws IOException;
 
 	/** Deletes one Backup for good. */
 	void deleteBackup(String worldId, String backupId) throws IOException;

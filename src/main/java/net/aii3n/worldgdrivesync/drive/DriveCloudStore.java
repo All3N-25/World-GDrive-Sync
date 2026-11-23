@@ -46,8 +46,8 @@ import java.util.function.LongConsumer;
  * <pre>
  * World GDrive Sync/            folder        t=root
  *   &lt;world name&gt;/              folder        t=world   (its Drive id is the world id)
- *     current.zip               Current Save  t=current
- *     metadata.json             {"revision":1,"savedAt":"..."}  t=meta
+ *     current.zip               Current Save  t=current, r=&lt;Revision&gt;, s=&lt;savedAt&gt;
+ *     metadata.json             only in worlds shared before r/s moved onto current.zip  t=meta
  *     lock-&lt;host id&gt;.json       one per Lock  t=lock, h=&lt;host id&gt;
  *     incoming.zip              a replacing upload in progress  t=incoming
  *     backups/                  folder        t=backups
@@ -62,6 +62,7 @@ public final class DriveCloudStore implements CloudStore {
 	/** Resumable upload chunk; Drive wants a multiple of 256 KiB. */
 	private static final int CHUNK = 8 * 1024 * 1024;
 	private static final int ATTEMPTS = 4;
+	private static final System.Logger LOGGER = System.getLogger(DriveCloudStore.class.getName());
 
 	private final GoogleAccount account;
 	private final HttpClient http = HttpClient.newBuilder()
@@ -89,8 +90,21 @@ public final class DriveCloudStore implements CloudStore {
 		return new CloudWorld(string(folder, "id"), string(folder, "name"));
 	}
 
+	/**
+	 * The Revision and save time on the Current Save's own {@code appProperties}. If several files are
+	 * tagged {@code t=current} (a replacement whose clean-up failed), the highest Revision is the
+	 * Current Save. A world shared before Revisions moved onto {@code current.zip} has none there,
+	 * and its {@code metadata.json} is read instead.
+	 */
 	@Override
 	public Optional<WorldMetadata> readMetadata(String worldId) throws IOException {
+		Optional<JsonObject> current = currentSave(worldId);
+		if (current.isEmpty()) return Optional.empty();
+		Optional<WorldMetadata> tagged = revisionOf(current.get());
+		return tagged.isPresent() ? tagged : legacyMetadata(worldId);
+	}
+
+	private Optional<WorldMetadata> legacyMetadata(String worldId) throws IOException {
 		Optional<String> file = child(worldId, "meta");
 		if (file.isEmpty()) return Optional.empty();
 		String body = new String(download(file.get()), StandardCharsets.UTF_8);
@@ -102,75 +116,61 @@ public final class DriveCloudStore implements CloudStore {
 		}
 	}
 
-	@Override
-	public void writeMetadata(String worldId, WorldMetadata metadata) throws IOException {
-		JsonObject json = new JsonObject();
-		json.addProperty("revision", metadata.revision());
-		json.addProperty("savedAt", metadata.savedAt().toString());
-		byte[] content = json.toString().getBytes(StandardCharsets.UTF_8);
+	/** The file that is the Current Save: of the files tagged {@code t=current}, the highest Revision. */
+	private Optional<JsonObject> currentSave(String worldId) throws IOException {
+		return currentSaveFiles(worldId).stream().max(Comparator.comparingInt(DriveCloudStore::revisionNumber));
+	}
 
-		Optional<String> existing = child(worldId, "meta");
-		if (existing.isPresent()) {
-			send(token -> HttpRequest.newBuilder(URI.create(UPLOAD_API + "/files/" + existing.get() + "?uploadType=media&fields=id"))
-					.header("Authorization", "Bearer " + token)
-					.header("Content-Type", "application/json")
-					.method("PATCH", HttpRequest.BodyPublishers.ofByteArray(content)));
-		} else {
-			createSmallFile("metadata.json", worldId, tag("meta"), "application/json", content);
+	private List<JsonObject> currentSaveFiles(String worldId) throws IOException {
+		return search("'" + worldId + "' in parents and " + tagged("current"));
+	}
+
+	private static int revisionNumber(JsonObject file) {
+		return revisionOf(file).map(WorldMetadata::revision).orElse(-1);
+	}
+
+	private static Optional<WorldMetadata> revisionOf(JsonObject file) {
+		JsonObject properties = file.getAsJsonObject("appProperties");
+		if (properties == null || !properties.has("r") || !properties.has("s")) return Optional.empty();
+		try {
+			return Optional.of(new WorldMetadata(Integer.parseInt(string(properties, "r")), Instant.parse(string(properties, "s"))));
+		} catch (RuntimeException e) {
+			return Optional.empty();
 		}
 	}
 
 	@Override
-	public void uploadCurrentSave(String worldId, Path zip, LongConsumer bytesSent) throws IOException {
-		long size = Files.size(zip);
-		Optional<String> existing = child(worldId, "current");
-		JsonObject metadata = new JsonObject();
-		String sessionStart;
-		String method;
-		if (existing.isPresent()) {
-			sessionStart = UPLOAD_API + "/files/" + existing.get() + "?uploadType=resumable&fields=id";
-			method = "PATCH";
-		} else {
-			metadata.addProperty("name", "current.zip");
-			metadata.add("parents", single(worldId));
-			metadata.add("appProperties", tag("current"));
-			sessionStart = UPLOAD_API + "/files?uploadType=resumable&fields=id";
-			method = "POST";
-		}
-		resumableUpload(sessionStart, method, metadata, zip, bytesSent);
+	public void uploadCurrentSave(String worldId, Path zip, WorldMetadata metadata, LongConsumer bytesSent) throws IOException {
+		JsonObject file = new JsonObject();
+		file.addProperty("name", "current.zip");
+		file.add("parents", single(worldId));
+		file.add("appProperties", currentProperties(metadata));
+		resumableUpload(file, zip, bytesSent);
 	}
 
 	/**
-	 * Uploads the new zip as a separate file tagged {@code t=incoming}, and only once it is complete
-	 * moves the old {@code current.zip} into {@code backups/} (renamed, re-tagged {@code t=backup}
-	 * with its label) and tags the new file {@code t=current}. Leftover incoming files from an
-	 * earlier failed attempt are deleted first.
+	 * Uploads the new zip as a separate file tagged {@code t=incoming}. Once it is complete, one
+	 * PATCH names it {@code current.zip} and tags it {@code t=current} with its Revision: from that
+	 * call on it is the Current Save, as the highest Revision. Then the old Current Save moves into
+	 * {@code backups/}. Leftover incoming files from an earlier failed attempt are deleted first.
 	 */
 	@Override
-	public Backup replaceCurrentSave(String worldId, Path zip, BackupLabel previous, LongConsumer bytesSent) throws IOException {
-		String oldId = child(worldId, "current").orElseThrow(() -> new IOException("World " + worldId + " has no Current Save to replace"));
+	public Backup replaceCurrentSave(String worldId, Path zip, WorldMetadata next, BackupLabel previous, LongConsumer bytesSent) throws IOException {
+		JsonObject old = currentSave(worldId).orElseThrow(() -> new IOException("World " + worldId + " has no Current Save to replace"));
 		for (JsonObject leftover : search("'" + worldId + "' in parents and " + tagged("incoming"))) {
 			deleteFile(string(leftover, "id"));
 		}
 
-		JsonObject metadata = new JsonObject();
-		metadata.addProperty("name", "incoming.zip");
-		metadata.add("parents", single(worldId));
-		metadata.add("appProperties", tag("incoming"));
-		String newId = string(resumableUpload(UPLOAD_API + "/files?uploadType=resumable&fields=id", "POST", metadata, zip, bytesSent), "id");
+		JsonObject incoming = new JsonObject();
+		incoming.addProperty("name", "incoming.zip");
+		incoming.add("parents", single(worldId));
+		incoming.add("appProperties", tag("incoming"));
+		String newId = string(resumableUpload(incoming, zip, bytesSent), "id");
 		if (newId == null) throw new IOException("Drive didn't say where the upload went");
 
-		JsonObject backup = new JsonObject();
-		backup.addProperty("name", "backup-r" + previous.revision() + "-" + previous.savedAt().toString().replace(':', '-') + ".zip");
-		backup.add("appProperties", backupProperties(previous));
-		String backupsId = backupsFolder(worldId);
-		patch(API + "/files/" + oldId + "?addParents=" + enc(backupsId) + "&removeParents=" + enc(worldId) + "&fields=id", backup);
-
-		JsonObject current = new JsonObject();
-		current.addProperty("name", "current.zip");
-		current.add("appProperties", tag("current"));
-		patch(API + "/files/" + newId + "?fields=id", current);
-		return new Backup(oldId, previous);
+		patch(API + "/files/" + newId + "?fields=id", currentFile(next));
+		moveOldCurrentSavesToBackups(worldId, newId, string(old, "id"), previous);
+		return new Backup(string(old, "id"), previous);
 	}
 
 	/**
@@ -179,12 +179,11 @@ public final class DriveCloudStore implements CloudStore {
 	 */
 	@Override
 	public Backup uploadBackup(String worldId, Path zip, BackupLabel label, LongConsumer bytesSent) throws IOException {
-		JsonObject metadata = new JsonObject();
-		metadata.addProperty("name", "backup-r" + label.revision() + "-" + label.savedAt().toString().replace(':', '-')
-				+ (label.unmerged().isPresent() ? "-unmerged" : "") + ".zip");
-		metadata.add("parents", single(backupsFolder(worldId)));
-		metadata.add("appProperties", backupProperties(label));
-		String id = string(resumableUpload(UPLOAD_API + "/files?uploadType=resumable&fields=id", "POST", metadata, zip, bytesSent), "id");
+		JsonObject file = new JsonObject();
+		file.addProperty("name", backupFileName(label));
+		file.add("parents", single(backupsFolder(worldId)));
+		file.add("appProperties", backupProperties(label));
+		String id = string(resumableUpload(file, zip, bytesSent), "id");
 		if (id == null) throw new IOException("Drive didn't say where the upload went");
 		return new Backup(id, label);
 	}
@@ -205,44 +204,70 @@ public final class DriveCloudStore implements CloudStore {
 	}
 
 	/**
-	 * Two PATCHes, no re-upload: the old {@code current.zip} moves into {@code backups/} (renamed,
-	 * re-tagged {@code t=backup} with its label), then the chosen Backup moves into the world folder
-	 * as {@code current.zip} ({@code t=current}). If the second PATCH fails, the first is undone
-	 * (best effort), so the world keeps a Current Save.
+	 * No re-upload: one PATCH moves the chosen Backup into the world folder as {@code current.zip},
+	 * tagged {@code t=current} with the new Revision, which makes it the Current Save. Then the old
+	 * Current Save moves into {@code backups/}.
 	 */
 	@Override
-	public Backup restoreBackup(String worldId, String backupId, BackupLabel previous) throws IOException {
-		String oldId = child(worldId, "current").orElseThrow(() -> new IOException("World " + worldId + " has no Current Save to replace"));
+	public Backup restoreBackup(String worldId, String backupId, WorldMetadata next, BackupLabel previous) throws IOException {
+		JsonObject old = currentSave(worldId).orElseThrow(() -> new IOException("World " + worldId + " has no Current Save to replace"));
 		String backupsId = backupsFolder(worldId);
-
-		JsonObject backup = new JsonObject();
-		backup.addProperty("name", "backup-r" + previous.revision() + "-" + previous.savedAt().toString().replace(':', '-') + ".zip");
-		backup.add("appProperties", backupProperties(previous));
-		patch(API + "/files/" + oldId + "?addParents=" + enc(backupsId) + "&removeParents=" + enc(worldId) + "&fields=id", backup);
-
-		JsonObject current = new JsonObject();
-		current.addProperty("name", "current.zip");
-		current.add("appProperties", currentProperties());
-		try {
-			patch(API + "/files/" + backupId + "?addParents=" + enc(worldId) + "&removeParents=" + enc(backupsId) + "&fields=id", current);
-		} catch (IOException | RuntimeException e) {
-			try {
-				patch(API + "/files/" + oldId + "?addParents=" + enc(worldId) + "&removeParents=" + enc(backupsId) + "&fields=id", current);
-			} catch (IOException | RuntimeException undo) {
-				e.addSuppressed(undo);
-			}
-			throw e;
-		}
-		return new Backup(oldId, previous);
+		patch(API + "/files/" + backupId + "?addParents=" + enc(worldId) + "&removeParents=" + enc(backupsId) + "&fields=id", currentFile(next));
+		moveOldCurrentSavesToBackups(worldId, backupId, string(old, "id"), previous);
+		return new Backup(string(old, "id"), previous);
 	}
 
 	/**
-	 * The {@code t=current} tag, with the Backup label keys set to null so Drive removes them from a
-	 * file that was a Backup.
+	 * Moves every {@code t=current} file except {@code currentId} into {@code backups/}: the one that
+	 * was replaced ({@code replacedId}, labelled {@code replaced}), and any left over from an earlier
+	 * clean-up that failed (labelled by their own Revision). Best effort: the new Current Save is in
+	 * place already, so a failure only leaves an old file beside it until the next upload.
 	 */
-	private static JsonObject currentProperties() {
+	private void moveOldCurrentSavesToBackups(String worldId, String currentId, String replacedId, BackupLabel replaced) {
+		try {
+			for (JsonObject file : currentSaveFiles(worldId)) {
+				String id = string(file, "id");
+				if (id.equals(currentId)) continue;
+				BackupLabel label = id.equals(replacedId) ? replaced
+						: revisionOf(file).map(metadata -> new BackupLabel(metadata.revision(), metadata.savedAt(), Optional.empty())).orElse(replaced);
+				moveToBackups(worldId, id, label);
+			}
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't move the old Current Save of " + worldId + " to Backups; will retry after the next upload", e);
+		}
+	}
+
+	/** Moves a file from the world folder into {@code backups/}, renamed and tagged as a Backup labelled {@code label}. */
+	private void moveToBackups(String worldId, String fileId, BackupLabel label) throws IOException {
+		JsonObject backup = new JsonObject();
+		backup.addProperty("name", backupFileName(label));
+		backup.add("appProperties", backupProperties(label));
+		patch(API + "/files/" + fileId + "?addParents=" + enc(backupsFolder(worldId)) + "&removeParents=" + enc(worldId) + "&fields=id", backup);
+	}
+
+	/** {@code backup-r<Revision>-<savedAt>[-unmerged].zip}, with {@code :} made file-name safe. */
+	private static String backupFileName(BackupLabel label) {
+		return "backup-r" + label.revision() + "-" + label.savedAt().toString().replace(':', '-')
+				+ (label.unmerged().isPresent() ? "-unmerged" : "") + ".zip";
+	}
+
+	/** The PATCH body that makes a file the Current Save carrying {@code metadata}. */
+	private static JsonObject currentFile(WorldMetadata metadata) {
+		JsonObject current = new JsonObject();
+		current.addProperty("name", "current.zip");
+		current.add("appProperties", currentProperties(metadata));
+		return current;
+	}
+
+	/**
+	 * The Current Save's tags: {@code t=current}, {@code r} Revision, {@code s} savedAt. The Unmerged
+	 * Backup keys are set to null so Drive removes them from a file that was a Backup.
+	 */
+	private static JsonObject currentProperties(WorldMetadata metadata) {
 		JsonObject properties = tag("current");
-		for (String key : List.of("r", "s", "uh", "un", "us")) properties.add(key, JsonNull.INSTANCE);
+		properties.addProperty("r", Integer.toString(metadata.revision()));
+		properties.addProperty("s", metadata.savedAt().toString());
+		for (String key : List.of("uh", "un", "us")) properties.add(key, JsonNull.INSTANCE);
 		return properties;
 	}
 
@@ -292,15 +317,15 @@ public final class DriveCloudStore implements CloudStore {
 				.header("Authorization", "Bearer " + token).DELETE());
 	}
 
-	/** Starts a resumable upload session and sends the zip through it; returns Drive's answer for the finished file. */
-	private JsonObject resumableUpload(String sessionStart, String method, JsonObject metadata, Path zip, LongConsumer bytesSent) throws IOException {
+	/** Starts a resumable upload of a new file and sends the zip through it; returns Drive's answer for the finished file. */
+	private JsonObject resumableUpload(JsonObject metadata, Path zip, LongConsumer bytesSent) throws IOException {
 		long size = Files.size(zip);
-		HttpResponse<byte[]> started = send(token -> HttpRequest.newBuilder(URI.create(sessionStart))
+		HttpResponse<byte[]> started = send(token -> HttpRequest.newBuilder(URI.create(UPLOAD_API + "/files?uploadType=resumable&fields=id"))
 				.header("Authorization", "Bearer " + token)
 				.header("Content-Type", "application/json; charset=UTF-8")
 				.header("X-Upload-Content-Type", "application/zip")
 				.header("X-Upload-Content-Length", Long.toString(size))
-				.method(method, HttpRequest.BodyPublishers.ofString(metadata.toString())));
+				.POST(HttpRequest.BodyPublishers.ofString(metadata.toString())));
 		URI session = started.headers().firstValue("Location").map(URI::create)
 				.orElseThrow(() -> new IOException("Drive didn't start the upload"));
 		return new ResumableUpload(session, zip, size, bytesSent).run();
@@ -308,7 +333,8 @@ public final class DriveCloudStore implements CloudStore {
 
 	@Override
 	public void downloadCurrentSave(String worldId, Path zip, BytesProgress progress) throws IOException {
-		String fileId = child(worldId, "current").orElseThrow(() -> new IOException("World " + worldId + " has no Current Save"));
+		String fileId = currentSave(worldId).map(file -> string(file, "id"))
+				.orElseThrow(() -> new IOException("World " + worldId + " has no Current Save"));
 		JsonObject info = json(send(token -> HttpRequest.newBuilder(URI.create(API + "/files/" + fileId + "?fields=size"))
 				.header("Authorization", "Bearer " + token).GET()));
 		long size = Long.parseLong(string(info, "size"));

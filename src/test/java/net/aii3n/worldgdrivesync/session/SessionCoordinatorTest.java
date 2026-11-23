@@ -701,6 +701,25 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void anUploadWhoseAnswerIsLostStillCarriesItsRevisionSoNobodySkipsTheDownload(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		bob.play(shared.id(), ProgressListener.NONE);
+		bob.leaveWithoutPlaying(shared.id()); // Bob now has a Local Copy of Revision 1.
+		LocalCopy alices = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(alices.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		// Alice's new Current Save is stored, then her connection drops before she hears back.
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
+		clock.advance(Duration.ofMinutes(10));
+
+		LocalCopy bobs = assertInstanceOf(PlayResult.Ready.class, bob.takeOver(shared.id(), ProgressListener.NONE)).localCopy();
+
+		assertEquals(2, bobs.revision());
+		assertEquals("chunks with Alice's house", Files.readString(bobs.folder().resolve("region/r.0.0.mca")));
+	}
+
+	@Test
 	void aFailedDownloadReleasesTheLockAgain(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		cloud.failDownloads();
