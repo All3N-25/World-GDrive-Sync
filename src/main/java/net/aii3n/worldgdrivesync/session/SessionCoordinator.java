@@ -1,13 +1,17 @@
 package net.aii3n.worldgdrivesync.session;
 
+import net.aii3n.worldgdrivesync.settings.Settings;
+
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.InstantSource;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 /**
@@ -20,24 +24,34 @@ import java.util.stream.Stream;
  */
 public final class SessionCoordinator {
 	private static final String STAGING_PREFIX = ".wgds-";
+	/** How long to wait after writing a Lock for a simultaneous one to show up in the cloud store. */
+	private static final Duration LOCK_SETTLE_TIME = Duration.ofSeconds(3);
 
 	private final CloudStore cloud;
-	private final InstantSource clock;
+	private final SessionClock clock;
 	private final Path localCopies;
 	private final Player me;
+	private final Supplier<Settings> settings;
+
+	/** A coordinator with the default {@link Settings}. */
+	public SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me) {
+		this(cloud, clock, localCopies, me, () -> Settings.DEFAULTS);
+	}
 
 	/**
 	 * @param cloud       where Shared Worlds are stored
-	 * @param clock       the time source for every timestamp the coordinator records
+	 * @param clock       the time source for every timestamp the coordinator records, and for waiting
 	 * @param localCopies the Local Copy directory ({@code sharedsaves/}, ADR-0002); one folder per
 	 *                    Shared World, named by its id
 	 * @param me          the player on this computer, who becomes Host when they press Play
+	 * @param settings    the player's current settings, read each time one is needed
 	 */
-	public SessionCoordinator(CloudStore cloud, InstantSource clock, Path localCopies, Player me) {
+	public SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me, Supplier<Settings> settings) {
 		this.cloud = cloud;
 		this.clock = clock;
 		this.localCopies = localCopies;
 		this.me = me;
+		this.settings = settings;
 	}
 
 	/**
@@ -98,13 +112,54 @@ public final class SessionCoordinator {
 	 * the Local Copy is the Current Revision, downloading it if this computer has an older one or
 	 * none. If that fails, the Lock is released again.
 	 *
-	 * @return {@link PlayResult.Ready} with the Local Copy to open, or {@link PlayResult.Refused}
+	 * @return {@link PlayResult.Ready} with the Local Copy to open, {@link PlayResult.Refused}, or
+	 *         {@link PlayResult.Stale} if the Lock someone else holds is Stale (offer {@link #takeOver})
 	 */
 	public PlayResult play(String worldId, ProgressListener progress) throws IOException {
 		Optional<Lock> held = currentLock(worldId);
-		if (held.isPresent() && !held.get().heldBy(me)) return new PlayResult.Refused(held.get());
+		if (held.isPresent() && !held.get().heldBy(me)) {
+			return isStale(held.get()) ? new PlayResult.Stale(held.get()) : new PlayResult.Refused(held.get());
+		}
+		return becomeHost(worldId, progress);
+	}
+
+	/**
+	 * Takeover: Play despite a Stale Lock, after the player accepted that its Host's unsaved progress
+	 * may be lost. Replaces the Stale Lock with this player's and starts from the latest Current Save.
+	 * Refused, changing nothing, if that Host's Heartbeat has resumed meanwhile.
+	 *
+	 * @return as {@link #play}, but never {@link PlayResult.Stale}
+	 */
+	public PlayResult takeOver(String worldId, ProgressListener progress) throws IOException {
+		Optional<Lock> held = currentLock(worldId);
+		if (held.isPresent() && !held.get().heldBy(me)) {
+			if (!isStale(held.get())) return new PlayResult.Refused(held.get());
+			cloud.deleteLock(worldId, held.get().hostId());
+		}
+		return becomeHost(worldId, progress);
+	}
+
+	/**
+	 * Takes the Lock, then brings the Local Copy up to date; releases the Lock again on failure.
+	 *
+	 * <p>The cloud store can't create a Lock only if none exists (ADR-0001), so two players who press
+	 * Play together may both write one. After writing, wait for the other's Lock to show up, then the
+	 * earliest Lock wins; the loser deletes their own and is told who is hosting.
+	 */
+	private PlayResult becomeHost(String worldId, ProgressListener progress) throws IOException {
 		cloud.writeLock(worldId, Lock.takenBy(me, clock.instant()));
 		try {
+			try {
+				clock.sleep(LOCK_SETTLE_TIME);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new InterruptedIOException("Interrupted while taking the Lock");
+			}
+			Optional<Lock> winner = currentLock(worldId);
+			if (winner.isPresent() && !winner.get().heldBy(me)) {
+				releaseLock(worldId);
+				return new PlayResult.Refused(winner.get());
+			}
 			return new PlayResult.Ready(bringLocalCopyUpToDate(worldId, progress));
 		} catch (IOException | RuntimeException e) {
 			releaseLock(worldId);
@@ -189,19 +244,43 @@ public final class SessionCoordinator {
 		}
 	}
 
+	/**
+	 * Heartbeat: refreshes this player's Lock so friends see they are still hosting. The game calls it
+	 * every minute while hosting. If the Lock is gone (a friend Took Over after it went Stale), it is
+	 * not put back.
+	 *
+	 * @return whether this player still holds the Lock
+	 */
+	public boolean heartbeat(String worldId) throws IOException {
+		Optional<Lock> mine = cloud.readLocks(worldId).stream().filter(lock -> lock.heldBy(me)).findFirst();
+		if (mine.isEmpty()) return false;
+		cloud.writeLock(worldId, mine.get().heartbeatAt(clock.instant()));
+		return true;
+	}
+
 	private void releaseLock(String worldId) throws IOException {
 		cloud.deleteLock(worldId, me.id());
 	}
 
-	/** The Lock that counts for a world: the earliest one, if several exist. */
+	/**
+	 * The Lock that counts for a world: the earliest one, if several exist. "Earliest" is the cloud
+	 * store's own order (see {@link CloudStore#readLocks}), not the players' clocks, which may disagree.
+	 */
 	private Optional<Lock> currentLock(String worldId) throws IOException {
-		return cloud.readLocks(worldId).stream().min(Comparator.comparing(Lock::startedAt));
+		return cloud.readLocks(worldId).stream().findFirst();
 	}
 
 	private WorldStatus status(String worldId) throws IOException {
 		return currentLock(worldId)
-				.<WorldStatus>map(lock -> new WorldStatus.Hosted(lock.hostName(), lock.startedAt()))
+				.<WorldStatus>map(lock -> isStale(lock)
+						? new WorldStatus.Stale(lock.hostName(), lock.lastHeartbeat())
+						: new WorldStatus.Hosted(lock.hostName(), lock.startedAt()))
 				.orElse(WorldStatus.FREE);
+	}
+
+	/** Whether {@code lock} has had no Heartbeat for longer than the stale timeout. */
+	private boolean isStale(Lock lock) {
+		return Duration.between(lock.lastHeartbeat(), clock.instant()).compareTo(settings.get().staleTimeout()) > 0;
 	}
 
 	private static SharedWorld sharedWorld(CloudWorld world, WorldMetadata metadata, WorldStatus status) {

@@ -27,6 +27,13 @@ final class InMemoryCloudStore implements CloudStore {
 	private int nextId = 1;
 	private boolean failUploads;
 	private boolean failDownloads;
+	private Hook beforeNextLockWrite;
+
+	/** Something a test runs in the middle of a cloud call, such as another player's Play. */
+	@FunctionalInterface
+	interface Hook {
+		void run() throws IOException;
+	}
 
 	private static final class Folder {
 		final String name;
@@ -96,6 +103,9 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized void writeLock(String worldId, Lock lock) throws IOException {
+		Hook hook = beforeNextLockWrite;
+		beforeNextLockWrite = null;
+		if (hook != null) hook.run();
 		folder(worldId).locks.put(lock.hostId(), lock);
 	}
 
@@ -114,6 +124,19 @@ final class InMemoryCloudStore implements CloudStore {
 	/** From now on every download fails partway, like a dropped connection. */
 	void failDownloads() {
 		failDownloads = true;
+	}
+
+	/**
+	 * Runs {@code hook} just before the next Lock is written, as if another player's calls landed
+	 * between this player reading the Locks and writing theirs.
+	 */
+	synchronized void beforeNextLockWrite(Hook hook) {
+		beforeNextLockWrite = hook;
+	}
+
+	/** The names of the players holding a Lock on the world, oldest Lock first. */
+	synchronized List<String> lockHolders(String worldId) {
+		return worlds.get(worldId).locks.values().stream().map(Lock::hostName).toList();
 	}
 
 	synchronized int worldCount() {

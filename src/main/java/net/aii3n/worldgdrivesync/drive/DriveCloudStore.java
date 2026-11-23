@@ -12,6 +12,7 @@ import net.aii3n.worldgdrivesync.session.Lock;
 import net.aii3n.worldgdrivesync.session.WorldMetadata;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -25,6 +26,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -199,8 +201,16 @@ public final class DriveCloudStore implements CloudStore {
 	@Override
 	public List<Lock> readLocks(String worldId) throws IOException {
 		List<Lock> locks = new ArrayList<>();
-		for (JsonObject file : search("'" + worldId + "' in parents and " + tagged("lock"))) {
-			String body = new String(download(string(file, "id")), StandardCharsets.UTF_8);
+		List<JsonObject> files = new ArrayList<>(search("'" + worldId + "' in parents and " + tagged("lock")));
+		// Earliest first by Drive's own createdTime (search orders by it); the file id breaks ties.
+		files.sort(Comparator.comparing((JsonObject f) -> Instant.parse(string(f, "createdTime"))).thenComparing(f -> string(f, "id")));
+		for (JsonObject file : files) {
+			String body;
+			try {
+				body = new String(download(string(file, "id")), StandardCharsets.UTF_8);
+			} catch (FileNotFoundException e) {
+				continue; // Deleted since the search: a player who lost a simultaneous Play, or a released Lock.
+			}
 			try {
 				JsonObject json = JsonParser.parseString(body).getAsJsonObject();
 				locks.add(new Lock(json.get("hostId").getAsString(), json.get("hostName").getAsString(),
@@ -238,8 +248,12 @@ public final class DriveCloudStore implements CloudStore {
 	public void deleteLock(String worldId, String hostId) throws IOException {
 		Optional<String> file = lockFile(worldId, hostId);
 		if (file.isEmpty()) return;
-		send(token -> HttpRequest.newBuilder(URI.create(API + "/files/" + file.get()))
-				.header("Authorization", "Bearer " + token).DELETE());
+		try {
+			send(token -> HttpRequest.newBuilder(URI.create(API + "/files/" + file.get()))
+					.header("Authorization", "Bearer " + token).DELETE());
+		} catch (FileNotFoundException e) {
+			// Already gone: two players Took Over the same Stale Lock at once.
+		}
 	}
 
 	private Optional<String> lockFile(String worldId, String hostId) throws IOException {
@@ -440,6 +454,7 @@ public final class DriveCloudStore implements CloudStore {
 				backOff(attempt);
 				continue;
 			}
+			if (status == 404) throw new FileNotFoundException("Google Drive error: " + describe(response));
 			throw new IOException("Google Drive error: " + describe(response));
 		}
 	}

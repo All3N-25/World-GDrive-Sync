@@ -47,11 +47,15 @@ public interface CloudStore {
 
 	/**
 	 * Every Lock in the world's folder. Normally none or one; briefly more when two players press
-	 * Play together (the coordinator settles that).
+	 * Play together (the coordinator settles that). Oldest first, by when the store itself created
+	 * each Lock (not by any player's clock), so every player agrees which Lock is earliest.
 	 */
 	List<Lock> readLocks(String worldId) throws IOException;
 
-	/** Creates or replaces the Lock of {@code lock.hostId()}, leaving other players' Locks alone. */
+	/**
+	 * Creates or replaces the Lock of {@code lock.hostId()}, leaving other players' Locks alone. A
+	 * replaced Lock (a Heartbeat) keeps its place in {@link #readLocks}'s order.
+	 */
 	void writeLock(String worldId, Lock lock) throws IOException;
 
 	/** Deletes the Lock of {@code hostId}, if there is one. */

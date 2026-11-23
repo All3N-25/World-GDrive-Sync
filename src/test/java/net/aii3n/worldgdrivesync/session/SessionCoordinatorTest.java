@@ -1,5 +1,6 @@
 package net.aii3n.worldgdrivesync.session;
 
+import net.aii3n.worldgdrivesync.settings.Settings;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -48,6 +49,147 @@ class SessionCoordinatorTest {
 	/** Another player on another computer, sharing the same cloud account. */
 	private SessionCoordinator friend(Path theirSharedsaves) {
 		return new SessionCoordinator(cloud, clock, theirSharedsaves, BOB);
+	}
+
+	// --- Heartbeat, Stale Lock, Takeover ---
+
+	@Test
+	void aLockWithNoHeartbeatForLongerThanTheStaleTimeoutShowsAsStale(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+
+		clock.advance(Duration.ofMinutes(4));
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+
+		// Alice's game crashed: no Heartbeat for over the default 5 minutes.
+		clock.advance(Duration.ofMinutes(2));
+		assertEquals(new WorldStatus.Stale("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void theStaleTimeoutComesFromSettings(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		Settings patient = Settings.DEFAULTS.withStaleTimeout(Duration.ofMinutes(15));
+		SessionCoordinator bob = new SessionCoordinator(cloud, clock, bobsSharedsaves, BOB, () -> patient);
+
+		clock.advance(Duration.ofMinutes(14));
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+
+		clock.advance(Duration.ofMinutes(2));
+		assertEquals(new WorldStatus.Stale("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void heartbeatsKeepTheLockFreshForAsLongAsTheHostPlays(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+
+		for (int minute = 1; minute <= 30; minute++) {
+			clock.advance(Duration.ofMinutes(1));
+			assertTrue(coordinator().heartbeat(shared.id()), "Alice still holds the Lock");
+		}
+
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+		// When the Heartbeats stop, the Lock goes Stale from the last one.
+		Instant lastHeartbeat = clock.instant();
+		clock.advance(Duration.ofMinutes(6));
+		assertEquals(new WorldStatus.Stale("Alice", lastHeartbeat), bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void playOnAStaleWorldOffersTakeoverAndWaitingChangesNothing(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		SessionCoordinator bob = friend(bobsSharedsaves);
+
+		PlayResult result = bob.play(shared.id(), ProgressListener.NONE);
+
+		PlayResult.Stale stale = assertInstanceOf(PlayResult.Stale.class, result);
+		assertEquals("Alice", stale.heldBy().hostName());
+		assertEquals(SHARED_AT, stale.heldBy().lastHeartbeat());
+		// Bob chooses Wait: nothing was taken or downloaded, and Alice can still come back.
+		assertEquals(Optional.empty(), bob.localCopy(shared.id()));
+		assertEquals(new WorldStatus.Stale("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+		assertTrue(coordinator().heartbeat(shared.id()), "Alice's Lock is untouched");
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void takeoverReplacesTheStaleLockAndStartsFromTheLatestCurrentSave(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		bob.play(shared.id(), ProgressListener.NONE);
+		bob.quit(shared.id(), ProgressListener.NONE);
+		// Alice uploads Revision 3, plays again, and crashes.
+		LocalCopy alices = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(alices.folder().resolve("region/r.0.0.mca"), "chunks with Alice's tower");
+		coordinator().quit(shared.id(), ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		assertInstanceOf(PlayResult.Stale.class, bob.play(shared.id(), ProgressListener.NONE));
+
+		PlayResult result = bob.takeOver(shared.id(), ProgressListener.NONE);
+
+		LocalCopy bobs = assertInstanceOf(PlayResult.Ready.class, result).localCopy();
+		assertEquals(3, bobs.revision());
+		assertEquals("chunks with Alice's tower", Files.readString(bobs.folder().resolve("region/r.0.0.mca")));
+		assertEquals(new WorldStatus.Hosted("Bob", clock.instant()), coordinator().listSharedWorlds().getFirst().status());
+		// Alice's game comes back to life: her Lock is gone and her Heartbeat doesn't restore it.
+		assertFalse(coordinator().heartbeat(shared.id()));
+		assertEquals("Bob", ((WorldStatus.Hosted) coordinator().listSharedWorlds().getFirst().status()).host());
+	}
+
+	@Test
+	void takeoverIsRefusedIfTheHostCameBackMeanwhile(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		assertInstanceOf(PlayResult.Stale.class, bob.play(shared.id(), ProgressListener.NONE));
+		coordinator().heartbeat(shared.id());
+
+		PlayResult result = bob.takeOver(shared.id(), ProgressListener.NONE);
+
+		assertEquals("Alice", assertInstanceOf(PlayResult.Refused.class, result).heldBy().hostName());
+		assertEquals(Optional.empty(), bob.localCopy(shared.id()));
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void whenTwoPlayersPressPlayTogetherTheEarliestLockWins(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		List<PlayResult> bobsResult = new ArrayList<>();
+		// Both saw the world Free. Bob's Lock lands just before Alice's does.
+		cloud.beforeNextLockWrite(() -> bobsResult.add(bob.play(shared.id(), ProgressListener.NONE)));
+
+		PlayResult alicesResult = coordinator().play(shared.id(), ProgressListener.NONE);
+
+		assertInstanceOf(PlayResult.Ready.class, bobsResult.getFirst());
+		assertEquals("Bob", assertInstanceOf(PlayResult.Refused.class, alicesResult).heldBy().hostName());
+		assertEquals(List.of("Bob"), cloud.lockHolders(shared.id()));
+		assertEquals("Bob", ((WorldStatus.Hosted) coordinator().listSharedWorlds().getFirst().status()).host());
+	}
+
+	@Test
+	void whenTwoPlayersTakeOverTogetherTheEarliestLockWins(@TempDir Path bobsSharedsaves, @TempDir Path carolsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		SessionCoordinator carol = new SessionCoordinator(cloud, clock, carolsSharedsaves, new Player("uuid-carol", "Carol"));
+		List<PlayResult> carolsResult = new ArrayList<>();
+		cloud.beforeNextLockWrite(() -> carolsResult.add(carol.takeOver(shared.id(), ProgressListener.NONE)));
+
+		PlayResult bobsResult = bob.takeOver(shared.id(), ProgressListener.NONE);
+
+		assertInstanceOf(PlayResult.Ready.class, carolsResult.getFirst());
+		assertEquals("Carol", assertInstanceOf(PlayResult.Refused.class, bobsResult).heldBy().hostName());
+		assertEquals(List.of("Carol"), cloud.lockHolders(shared.id()));
 	}
 
 	// --- Play and quit ---

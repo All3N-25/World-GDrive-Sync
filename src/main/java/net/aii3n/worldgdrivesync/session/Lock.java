@@ -18,6 +18,11 @@ public record Lock(String hostId, String hostName, Instant startedAt, Instant la
 		return new Lock(host.id(), host.name(), now, now);
 	}
 
+	/** This Lock, refreshed by a Heartbeat at {@code now}. */
+	Lock heartbeatAt(Instant now) {
+		return new Lock(hostId, hostName, startedAt, now);
+	}
+
 	boolean heldBy(Player player) {
 		return hostId.equals(player.id());
 	}
