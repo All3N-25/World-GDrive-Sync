@@ -176,14 +176,37 @@ class SessionCoordinatorTest {
 		clock.advance(Duration.ofMinutes(2));
 		coordinator().play(shared.id(), ProgressListener.NONE);
 		coordinator().leaveWithoutPlaying(shared.id());
-		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
 
-		PlayResult.Ready ready = assertInstanceOf(PlayResult.Ready.class, coordinator().play(shared.id(), ProgressListener.NONE));
+		// She keeps the Lock: her tower is a Pending Upload, and Bob can't start over it.
+		assertEquals(List.of(shared.id()), coordinator().pendingUploads());
+		assertTrue(coordinator().localCopy(shared.id()).orElseThrow().pendingUpload());
+		assertEquals("Alice", assertInstanceOf(PlayResult.Refused.class,
+				friend(bobsSharedsaves).play(shared.id(), ProgressListener.NONE)).heldBy().hostName());
 
-		Backup unmerged = ready.unmergedBackup().orElseThrow();
-		assertEquals(new CrashedSession(ALICE.id(), "Alice", SHARED_AT), unmerged.unmerged().orElseThrow());
-		assertEquals("chunks with Alice's tower", cloud.backupEntries(shared.id(), unmerged.id()).get("region/r.0.0.mca"));
-		assertEquals("chunks with Bob's farm", Files.readString(ready.localCopy().folder().resolve("region/r.0.0.mca")));
+		coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		assertEquals(2, cloud.metadata(shared.id()).revision());
+		assertEquals("chunks with Alice's tower", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		assertEquals(WorldStatus.FREE, friend(bobsSharedsaves).listSharedWorlds().getFirst().status());
+		assertEquals(List.of(), coordinator().pendingUploads());
+	}
+
+	@Test
+	void aResumedSessionWhosePlayFailsKeepsTheLockAsAPendingUpload(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy alices = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(alices.folder().resolve("region/r.0.0.mca"), "chunks with Alice's tower");
+		// Crash. Alice relaunches and presses Play, but the cloud stops answering partway.
+		clock.advance(Duration.ofMinutes(2));
+		cloud.failMetadataReads();
+
+		assertThrows(IOException.class, () -> coordinator().play(shared.id(), ProgressListener.NONE));
+
+		cloud.metadataReadsWork();
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+		assertEquals(List.of(shared.id()), coordinator().pendingUploads());
+		assertEquals("Alice", assertInstanceOf(PlayResult.Refused.class,
+				friend(bobsSharedsaves).play(shared.id(), ProgressListener.NONE)).heldBy().hostName());
 	}
 
 	@Test

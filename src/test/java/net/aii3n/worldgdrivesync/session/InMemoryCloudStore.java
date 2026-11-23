@@ -27,6 +27,7 @@ final class InMemoryCloudStore implements CloudStore {
 	private int nextId = 1;
 	private boolean failUploads;
 	private boolean failDownloads;
+	private boolean failMetadataReads;
 	private Hook beforeNextLockWrite;
 
 	/** Something a test runs in the middle of a cloud call, such as another player's Play. */
@@ -69,6 +70,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized Optional<WorldMetadata> readMetadata(String worldId) throws IOException {
+		if (failMetadataReads) throw new IOException("Network down (simulated)");
 		return Optional.ofNullable(folder(worldId).metadata);
 	}
 
@@ -190,6 +192,16 @@ final class InMemoryCloudStore implements CloudStore {
 	/** The connection is back: uploads succeed again after {@link #failUploads}. */
 	void uploadsWork() {
 		failUploads = false;
+	}
+
+	/** From now on reading a world's metadata fails, like a dropped connection. */
+	void failMetadataReads() {
+		failMetadataReads = true;
+	}
+
+	/** The connection is back: metadata reads succeed again after {@link #failMetadataReads}. */
+	void metadataReadsWork() {
+		failMetadataReads = false;
 	}
 
 	/** From now on every download fails partway, like a dropped connection. */

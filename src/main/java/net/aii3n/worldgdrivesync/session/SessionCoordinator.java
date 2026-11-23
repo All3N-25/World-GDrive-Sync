@@ -175,8 +175,38 @@ public final class SessionCoordinator {
 			markSessionOpen(worldId, startedAt);
 			return new PlayResult.Ready(localCopy(worldId).orElseThrow(), unmerged);
 		} catch (IOException | RuntimeException e) {
-			releaseLock(worldId);
+			try {
+				giveUpHosting(worldId);
+			} catch (IOException | RuntimeException release) {
+				e.addSuppressed(release);
+			}
 			throw e;
+		}
+	}
+
+	/**
+	 * Ends this player's hosting without an upload. The Lock is released, unless the Local Copy holds
+	 * unsaved progress (a crashed session or a Pending Upload) that can still become the Current
+	 * Save: then the Lock is kept and the Local Copy becomes a Pending Upload, so nobody starts over
+	 * it. Progress the cloud has already moved past doesn't need the Lock: it becomes an Unmerged
+	 * Backup.
+	 */
+	private void giveUpHosting(String worldId) throws IOException {
+		Path folder = localCopies.resolve(worldId);
+		Optional<LocalCopyRecord> record = LocalCopyRecord.read(folder);
+		if (record.isPresent() && record.get().hasUnsavedProgress() && !cloudMovedPast(worldId, record.get())) {
+			record.get().withPendingUpload(true).write(folder);
+			return;
+		}
+		releaseLock(worldId);
+	}
+
+	/** Whether someone uploaded a newer Revision than this Local Copy's; false if that can't be told. */
+	private boolean cloudMovedPast(String worldId, LocalCopyRecord record) {
+		try {
+			return cloud.readMetadata(worldId).map(current -> current.revision() > record.revision()).orElse(false);
+		} catch (IOException e) {
+			return false;
 		}
 	}
 
@@ -287,7 +317,9 @@ public final class SessionCoordinator {
 
 	/**
 	 * Gives up hosting after a successful {@link #play} but before the world was opened (the player
-	 * backed out of a prompt, or the world failed to load). Nothing changed, so nothing is uploaded.
+	 * backed out of a prompt, or the world failed to load). Nothing changed, so nothing is uploaded,
+	 * and the Lock is released. But if that Play resumed a crashed session, its progress still has to
+	 * be uploaded: the Lock is kept and the Local Copy becomes a Pending Upload.
 	 */
 	public void leaveWithoutPlaying(String worldId) throws IOException {
 		// The session this Play opened is over with nothing to upload. A crashed session it resumed
@@ -298,7 +330,7 @@ public final class SessionCoordinator {
 		if (mine.isPresent() && record.isPresent() && record.get().sessionStartedAt().equals(Optional.of(mine.get().startedAt()))) {
 			record.get().withSessionStartedAt(Optional.empty()).write(folder);
 		}
-		releaseLock(worldId);
+		giveUpHosting(worldId);
 	}
 
 	/**
