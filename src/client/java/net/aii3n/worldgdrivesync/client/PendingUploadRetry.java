@@ -7,7 +7,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 
 /**
  * Retries every Pending Upload on this computer once the game has started, so a Host whose final
- * upload failed doesn't have to remember. Runs on the network thread; a failure is only logged and
+ * upload failed, or whose game crashed or was closed while hosting, doesn't have to remember. Runs on the network thread; a failure is only logged and
  * the Pending Upload stays on the Shared Worlds screen with its Retry button.
  */
 final class PendingUploadRetry {

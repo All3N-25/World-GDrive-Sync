@@ -77,17 +77,24 @@ public final class SessionCoordinator {
 	}
 
 	/**
-	 * The Shared Worlds whose Local Copy on this computer is a Pending Upload. Reads only the Local
-	 * Copy directory, so it works offline; the game retries each one on launch.
+	 * The Shared Worlds whose Local Copy on this computer still has to be uploaded: a Pending Upload,
+	 * or a hosting session that ended without its final upload (the game crashed or its window was
+	 * closed). Reads only the Local Copy directory, so it works offline. The game retries each one
+	 * with {@link #retryPendingUpload} on launch, before it hosts anything, so none of these is a
+	 * session still open in this game.
 	 */
 	public List<String> pendingUploads() throws IOException {
 		if (!Files.isDirectory(localCopies)) return List.of();
 		try (Stream<Path> folders = Files.list(localCopies)) {
 			return folders.map(folder -> folder.getFileName().toString())
-					.filter(worldId -> !worldId.startsWith(STAGING_PREFIX) && hasPendingUpload(worldId))
+					.filter(worldId -> !worldId.startsWith(STAGING_PREFIX) && hasUnsavedProgress(worldId))
 					.sorted()
 					.toList();
 		}
+	}
+
+	private boolean hasUnsavedProgress(String worldId) {
+		return LocalCopyRecord.read(localCopies.resolve(worldId)).map(LocalCopyRecord::hasUnsavedProgress).orElse(false);
 	}
 
 	private boolean hasPendingUpload(String worldId) {
@@ -357,9 +364,10 @@ public final class SessionCoordinator {
 	}
 
 	/**
-	 * Retries a Pending Upload left by a failed {@link #quit}: uploads the Local Copy as the next
-	 * Revision, clears the Pending Upload and releases the Lock, just like a normal quit. If it fails
-	 * again, this throws and the Lock and the Pending Upload are kept.
+	 * Retries a Pending Upload left by a failed {@link #quit}, or by a hosting session that ended
+	 * without one (see {@link #pendingUploads}): uploads the Local Copy as the next Revision, clears
+	 * the Pending Upload and releases the Lock, just like a normal quit. If it fails, this throws and
+	 * the Lock and the Pending Upload are kept.
 	 *
 	 * <p>It never overwrites a newer Revision or uploads under another Host. If the cloud has moved
 	 * past the Local Copy's Revision (someone Took Over and uploaded), the Pending Upload is kept as
@@ -369,8 +377,14 @@ public final class SessionCoordinator {
 	 * again for the upload.
 	 */
 	public RetryResult retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
-		LocalCopyRecord record = LocalCopyRecord.read(localCopies.resolve(worldId)).filter(LocalCopyRecord::pendingUpload)
+		Path folder = localCopies.resolve(worldId);
+		LocalCopyRecord record = LocalCopyRecord.read(folder).filter(LocalCopyRecord::hasUnsavedProgress)
 				.orElseThrow(() -> new IOException("No Pending Upload of " + worldId + " on this computer"));
+		if (!record.pendingUpload()) {
+			// A session that ended without its final upload: from now on it is a Pending Upload.
+			record = record.withPendingUpload(true);
+			record.write(folder);
+		}
 		WorldMetadata current = cloud.readMetadata(worldId)
 				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
 		if (current.revision() > record.revision()) {

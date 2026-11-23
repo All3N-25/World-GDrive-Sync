@@ -86,6 +86,50 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void aSessionClosedWithoutItsFinalUploadIsUploadedByTheRetryOnLaunch(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		clock.advance(Duration.ofMinutes(30));
+		coordinator().heartbeat(shared.id());
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(local.folder(), folder), ProgressListener.NONE);
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house and garden");
+		// Alice closes the game window instead of Save and Quit, and starts it again later.
+		clock.advance(Duration.ofMinutes(3));
+		SessionCoordinator afterRestart = coordinator();
+
+		assertEquals(List.of(shared.id()), afterRestart.pendingUploads());
+		RetryResult result = afterRestart.retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		assertEquals(3, assertInstanceOf(RetryResult.Uploaded.class, result).current().revision());
+		assertEquals("chunks with Alice's house and garden", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		assertEquals(WorldStatus.FREE, friend(bobsSharedsaves).listSharedWorlds().getFirst().status());
+		assertEquals(List.of(), afterRestart.pendingUploads());
+		assertEquals(List.of(), unmergedBackups(shared.id()));
+	}
+
+	@Test
+	void aSessionClosedWithoutItsFinalUploadBecomesAnUnmergedBackupOnLaunchIfSomeoneUploadedSince(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		// Alice closes the game window; her Lock goes Stale and Bob Takes Over and uploads.
+		clock.advance(Duration.ofMinutes(10));
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		LocalCopy bobs = ((PlayResult.Ready) bob.takeOver(shared.id(), ProgressListener.NONE)).localCopy();
+		write(bobs.folder().resolve("region/r.0.0.mca"), "chunks with Bob's farm");
+		bob.quit(shared.id(), ProgressListener.NONE);
+
+		RetryResult result = coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		Backup unmerged = assertInstanceOf(RetryResult.KeptAsUnmergedBackup.class, result).backup();
+		assertEquals(new CrashedSession(ALICE.id(), "Alice", SHARED_AT), unmerged.unmerged().orElseThrow());
+		assertEquals("chunks with Alice's house", cloud.backupEntries(shared.id(), unmerged.id()).get("region/r.0.0.mca"));
+		assertEquals("chunks with Bob's farm", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		assertEquals(List.of(), coordinator().pendingUploads());
+	}
+
+	@Test
 	void aCrashedHostReturningAfterATakeoverGetsAnUnmergedBackupAndTheNewerRevisionStaysIntact(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		Instant alicesSessionStart = clock.instant();
@@ -262,7 +306,7 @@ class SessionCoordinatorTest {
 		assertEquals("chunks with Bob's farm", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
 		assertEquals(new LocalCopy(ready.localCopy().folder(), 2, false), ready.localCopy());
 		assertEquals("chunks with Bob's farm", Files.readString(ready.localCopy().folder().resolve("region/r.0.0.mca")));
-		assertEquals(List.of(), coordinator().pendingUploads());
+		assertFalse(coordinator().localCopy(shared.id()).orElseThrow().pendingUpload());
 	}
 
 	@Test
