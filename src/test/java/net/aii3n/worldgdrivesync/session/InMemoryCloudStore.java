@@ -111,6 +111,11 @@ final class InMemoryCloudStore implements CloudStore {
 		failUploads = true;
 	}
 
+	/** The connection is back: uploads succeed again after {@link #failUploads}. */
+	void uploadsWork() {
+		failUploads = false;
+	}
+
 	/** From now on every download fails partway, like a dropped connection. */
 	void failDownloads() {
 		failDownloads = true;
