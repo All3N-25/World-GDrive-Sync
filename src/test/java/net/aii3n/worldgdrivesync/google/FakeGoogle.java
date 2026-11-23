@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A stand-in for Google's OAuth and Drive "about" endpoints, running on loopback.
@@ -31,6 +32,10 @@ final class FakeGoogle implements AutoCloseable {
 	private final HttpServer server;
 	final List<String> revokedTokens = new CopyOnWriteArrayList<>();
 	volatile String expectedCodeChallenge;
+	/** Access tokens issued from the refresh token are "refreshed-1", "refreshed-2", ... */
+	final AtomicInteger refreshes = new AtomicInteger();
+	/** Set when the refresh token is revoked elsewhere (e.g. from the Google account's security page). */
+	volatile boolean refreshTokenRevoked;
 
 	FakeGoogle() throws IOException {
 		server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
@@ -55,6 +60,16 @@ final class FakeGoogle implements AutoCloseable {
 				&& VALID_CODE.equals(form.get("code"))
 				&& form.get("code_verifier") != null
 				&& challengeOf(form.get("code_verifier")).equals(expectedCodeChallenge);
+		if ("refresh_token".equals(form.get("grant_type"))) {
+			if (REFRESH_TOKEN.equals(form.get("refresh_token")) && !refreshTokenRevoked) {
+				respond(exchange, 200, """
+						{"access_token":"refreshed-%d","expires_in":3599,"scope":"https://www.googleapis.com/auth/drive.file","token_type":"Bearer"}
+						""".formatted(refreshes.incrementAndGet()));
+			} else {
+				respond(exchange, 400, "{\"error\":\"invalid_grant\",\"error_description\":\"Token has been expired or revoked.\"}");
+			}
+			return;
+		}
 		if (ok) {
 			respond(exchange, 200, """
 					{"access_token":"%s","expires_in":3599,"refresh_token":"%s","scope":"https://www.googleapis.com/auth/drive.file","token_type":"Bearer"}

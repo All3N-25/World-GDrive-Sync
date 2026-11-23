@@ -21,12 +21,15 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.InstantSource;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -39,19 +42,94 @@ public final class GoogleAccount {
 	public static final String DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 	private static final Duration BROWSER_TIMEOUT = Duration.ofMinutes(5);
 	private static final SecureRandom RANDOM = new SecureRandom();
+	/** Replace the access token this long before Google says it expires. */
+	private static final Duration EXPIRY_MARGIN = Duration.ofMinutes(2);
 
 	private final Path tokenFile;
 	private final OAuthClient client;
 	private final GoogleEndpoints endpoints;
 	private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
+	private final InstantSource clock;
 	private volatile StoredSignIn stored;
+	/** Kept in memory only, never written to disk. */
+	private volatile AccessToken accessToken;
 
 	/** Loads any sign-in saved by an earlier game session from {@code tokenFile}. */
 	public GoogleAccount(Path tokenFile, OAuthClient client, GoogleEndpoints endpoints) {
+		this(tokenFile, client, endpoints, InstantSource.system());
+	}
+
+	/** As above, with the clock that decides when the access token needs replacing. */
+	public GoogleAccount(Path tokenFile, OAuthClient client, GoogleEndpoints endpoints, InstantSource clock) {
 		this.tokenFile = tokenFile;
 		this.client = client;
 		this.endpoints = endpoints;
+		this.clock = clock;
 		this.stored = StoredSignIn.load(tokenFile).orElse(null);
+	}
+
+	/**
+	 * A current access token for Drive calls. Blocks while it fetches a new one from Google with the
+	 * stored refresh token (when there is none yet, or it is about to expire). Call off the render
+	 * thread.
+	 *
+	 * @throws GoogleAuthException if not connected, if Google can't be reached, or if Google says
+	 *                             the sign-in was revoked or expired; in that last case the player
+	 *                             is disconnected and must connect again
+	 */
+	public synchronized String accessToken() {
+		StoredSignIn signIn = stored;
+		if (signIn == null) throw new GoogleAuthException("Not connected to Google");
+		AccessToken current = accessToken;
+		if (current != null && clock.instant().isBefore(current.expiresAt().minus(EXPIRY_MARGIN))) return current.value();
+
+		Map<String, String> params = new LinkedHashMap<>();
+		params.put("client_id", client.clientId());
+		params.put("client_secret", client.clientSecret());
+		params.put("refresh_token", signIn.refreshToken());
+		params.put("grant_type", "refresh_token");
+		HttpResponse<String> response;
+		try {
+			response = postForm(endpoints.token(), params).join();
+		} catch (CompletionException e) {
+			throw new GoogleAuthException("Couldn't reach Google", e.getCause());
+		}
+		JsonObject json = parseJson(response.body());
+		if ("invalid_grant".equals(string(json, "error"))) {
+			forget(signIn);
+			throw new GoogleAuthException("The Google sign-in was revoked or has expired; connect again in settings");
+		}
+		if (response.statusCode() != 200 || !json.has("access_token")) {
+			throw new GoogleAuthException("Google refused to renew access: " + describeError(json, response.statusCode()));
+		}
+		accessToken = accessTokenFrom(json);
+		return accessToken.value();
+	}
+
+	/** Drive answered 401 to {@code token}: the next {@link #accessToken()} fetches a new one. */
+	public synchronized void accessTokenRejected(String token) {
+		AccessToken current = accessToken;
+		if (current != null && current.value().equals(token)) accessToken = null;
+	}
+
+	private synchronized void forget(StoredSignIn signIn) {
+		if (stored != signIn) return;
+		stored = null;
+		accessToken = null;
+		try {
+			StoredSignIn.delete(tokenFile);
+		} catch (IOException ignored) {
+			// It is useless anyway; the next sign-in overwrites it.
+		}
+	}
+
+	private AccessToken accessTokenFrom(JsonObject tokens) {
+		JsonElement expiresIn = tokens.get("expires_in");
+		long seconds = expiresIn == null ? 0 : expiresIn.getAsLong();
+		return new AccessToken(string(tokens, "access_token"), clock.instant().plusSeconds(seconds));
+	}
+
+	private record AccessToken(String value, Instant expiresAt) {
 	}
 
 	/** The connected account's email, or empty when not connected. */
@@ -100,7 +178,7 @@ public final class GoogleAccount {
 				.whenComplete((c, e) -> server.stop(0))
 				.thenCompose(c -> exchangeCode(c, redirectUri, verifier))
 				.thenCompose(tokens -> fetchAccountEmail(string(tokens, "access_token"))
-						.thenApply(email -> remember(new StoredSignIn(string(tokens, "refresh_token"), email))));
+						.thenApply(email -> remember(new StoredSignIn(string(tokens, "refresh_token"), email), accessTokenFrom(tokens))));
 
 		try {
 			openBrowser.accept(authorizationUrl);
@@ -118,6 +196,7 @@ public final class GoogleAccount {
 	public CompletableFuture<Void> disconnect() {
 		StoredSignIn previous = stored;
 		stored = null;
+		accessToken = null;
 		try {
 			StoredSignIn.delete(tokenFile);
 		} catch (IOException e) {
@@ -128,7 +207,7 @@ public final class GoogleAccount {
 				.handle((response, error) -> null);
 	}
 
-	private String remember(StoredSignIn signIn) {
+	private synchronized String remember(StoredSignIn signIn, AccessToken token) {
 		if (signIn.refreshToken() == null) {
 			throw new GoogleAuthException("Google didn't grant offline access; try connecting again");
 		}
@@ -138,6 +217,7 @@ public final class GoogleAccount {
 			throw new GoogleAuthException("Couldn't save the sign-in", e);
 		}
 		stored = signIn;
+		accessToken = token;
 		return signIn.accountEmail();
 	}
 
