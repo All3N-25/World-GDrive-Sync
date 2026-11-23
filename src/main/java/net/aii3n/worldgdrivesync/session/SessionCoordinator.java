@@ -526,18 +526,26 @@ public final class SessionCoordinator {
 	 * Play downloads it. Refused, changing nothing, while anyone holds a Lock, fresh or Stale: a
 	 * Host's later upload would replace the restored world, and a crashed Host's progress would be
 	 * lost from view.
+	 *
+	 * <p>The restore holds the Lock while it works, taken like Play's (earliest Lock wins), so
+	 * nobody starts hosting halfway through; it releases it when done.
 	 */
 	public RestoreResult restoreBackup(String worldId, String backupId) throws IOException {
-		Optional<Lock> held = cloud.readLocks(worldId).stream().min(Comparator.comparing(Lock::startedAt));
+		Optional<Lock> held = currentLock(worldId);
 		if (held.isPresent()) return new RestoreResult.Refused(held.get());
-		WorldMetadata previous = cloud.readMetadata(worldId)
-				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-
-		Backup replaced = cloud.restoreBackup(worldId, backupId, BackupLabel.of(previous));
-		WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
-		cloud.writeMetadata(worldId, next);
-		pruneBackups(worldId);
-		return new RestoreResult.Restored(next, replaced);
+		Optional<Lock> winner = takeLock(worldId, clock.instant());
+		if (winner.isPresent()) return new RestoreResult.Refused(winner.get());
+		try {
+			WorldMetadata previous = cloud.readMetadata(worldId)
+					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
+			Backup replaced = cloud.restoreBackup(worldId, backupId, BackupLabel.of(previous));
+			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
+			cloud.writeMetadata(worldId, next);
+			pruneBackups(worldId);
+			return new RestoreResult.Restored(next, replaced);
+		} finally {
+			releaseLock(worldId);
+		}
 	}
 
 	/**

@@ -29,6 +29,7 @@ final class InMemoryCloudStore implements CloudStore {
 	private boolean failDownloads;
 	private boolean failMetadataReads;
 	private Hook beforeNextLockWrite;
+	private Hook beforeNextRestore;
 
 	/** Something a test runs in the middle of a cloud call, such as another player's Play. */
 	@FunctionalInterface
@@ -112,6 +113,9 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized Backup restoreBackup(String worldId, String backupId, BackupLabel previous) throws IOException {
+		Hook hook = beforeNextRestore;
+		beforeNextRestore = null;
+		if (hook != null) hook.run();
 		Folder folder = folder(worldId);
 		if (folder.currentSave == null) throw new IOException("No Current Save in " + worldId + " to replace");
 		StoredBackup chosen = folder.backups.remove(backupId);
@@ -220,6 +224,11 @@ final class InMemoryCloudStore implements CloudStore {
 	 */
 	synchronized void beforeNextLockWrite(Hook hook) {
 		beforeNextLockWrite = hook;
+	}
+
+	/** Runs {@code hook} just before the next Backup is restored, as if another player acted meanwhile. */
+	synchronized void beforeNextRestore(Hook hook) {
+		beforeNextRestore = hook;
 	}
 
 	/** The names of the players holding a Lock on the world, oldest Lock first. */

@@ -1078,6 +1078,40 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void nobodyCanStartPlayingWhileARestoreIsUnderWay(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(coordinator(), shared.id(), "chunks after the creeper");
+		Backup original = coordinator().backups(shared.id()).getFirst();
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		List<PlayResult> alicesResult = new ArrayList<>();
+		cloud.beforeNextRestore(() -> alicesResult.add(coordinator().play(shared.id(), ProgressListener.NONE)));
+
+		assertInstanceOf(RestoreResult.Restored.class, bob.restoreBackup(shared.id(), original.id()));
+
+		assertEquals("Bob", assertInstanceOf(PlayResult.Refused.class, alicesResult.getFirst()).heldBy().hostName());
+		assertEquals(List.of(), cloud.lockHolders(shared.id()), "the restore released its Lock");
+	}
+
+	@Test
+	void whenAPlayAndARestoreStartTogetherTheEarliestLockWins(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(coordinator(), shared.id(), "chunks after the creeper");
+		Backup original = coordinator().backups(shared.id()).getFirst();
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		List<PlayResult> alicesResult = new ArrayList<>();
+		// Both saw the world Free. Alice's Lock lands just before Bob's does.
+		cloud.beforeNextLockWrite(() -> alicesResult.add(coordinator().play(shared.id(), ProgressListener.NONE)));
+
+		RestoreResult result = bob.restoreBackup(shared.id(), original.id());
+
+		assertEquals("Alice", assertInstanceOf(RestoreResult.Refused.class, result).heldBy().hostName());
+		assertInstanceOf(PlayResult.Ready.class, alicesResult.getFirst());
+		assertEquals(2, cloud.metadata(shared.id()).revision());
+		assertEquals("chunks after the creeper", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
 	void restoreIsRefusedEvenWhenTheLockIsLongStale(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		hostASession(coordinator(), shared.id(), "chunks with Alice's house");
