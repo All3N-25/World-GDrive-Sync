@@ -42,6 +42,11 @@ public class PlayScreen extends CoordinatorProgressScreen<PlayResult> {
 	@Override
 	protected void onSuccess(PlayResult result) {
 		switch (result) {
+			case PlayResult.Ready ready when ready.unmergedBackup().isPresent() ->
+					// Tell the player their crashed session went to Backups before the newer world opens.
+					minecraft.gui.setScreen(new AlertScreen(() -> HostingSession.open(minecraft, world.id(), ready.localCopy(), lastScreen),
+							Component.translatable("world-gdrive-sync.play.unmerged.title"),
+							Component.translatable("world-gdrive-sync.play.unmerged", world.name())));
 			case PlayResult.Ready ready -> HostingSession.open(minecraft, world.id(), ready.localCopy(), lastScreen);
 			case PlayResult.Refused refused -> minecraft.gui.setScreen(new AlertScreen(() -> minecraft.gui.setScreen(lastScreen),
 					Component.translatable("world-gdrive-sync.play.refused.title"),

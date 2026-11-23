@@ -2,6 +2,7 @@ package net.aii3n.worldgdrivesync.client;
 
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.session.ProgressListener;
+import net.aii3n.worldgdrivesync.session.RetryResult;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 
 /**
@@ -19,8 +20,13 @@ final class PendingUploadRetry {
 			SharedWorlds.get().run(coordinator -> {
 				for (String worldId : coordinator.pendingUploads()) {
 					try {
-						coordinator.retryPendingUpload(worldId, ProgressListener.NONE);
-						WorldGDriveSync.LOGGER.info("Uploaded the Pending Upload of Shared World {}", worldId);
+						switch (coordinator.retryPendingUpload(worldId, ProgressListener.NONE)) {
+							case RetryResult.Uploaded uploaded -> WorldGDriveSync.LOGGER.info(
+									"Uploaded the Pending Upload of Shared World {} as Revision {}", worldId, uploaded.current().revision());
+							case RetryResult.KeptAsUnmergedBackup unmerged -> WorldGDriveSync.LOGGER.info(
+									"Someone uploaded a newer Revision of Shared World {}, so the Pending Upload was kept as Unmerged Backup {}",
+									worldId, unmerged.backup().id());
+						}
 					} catch (Exception e) {
 						WorldGDriveSync.LOGGER.warn("Retrying the Pending Upload of Shared World {} failed", worldId, e);
 					}
