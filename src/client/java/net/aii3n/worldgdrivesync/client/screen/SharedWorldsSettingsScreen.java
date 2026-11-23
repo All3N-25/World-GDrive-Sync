@@ -9,7 +9,9 @@ import net.aii3n.worldgdrivesync.settings.SettingsFile;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.layouts.HeaderAndFooterLayout;
 import net.minecraft.client.gui.layouts.LinearLayout;
 import net.minecraft.client.gui.screens.Screen;
@@ -18,19 +20,23 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.util.List;
+import java.util.TreeSet;
 
 /**
  * Mod settings: connect the shared Google account through the system browser, see which account
- * is connected, and disconnect it; and the Shared World settings (how many Backups to keep). The
- * settings are saved when the screen closes.
+ * is connected, and disconnect it; and the Shared World settings (periodic upload, saved at once;
+ * how many Backups to keep, saved when the screen closes).
  */
 public class SharedWorldsSettingsScreen extends Screen {
 	private static final Component TITLE = Component.translatable("world-gdrive-sync.settings.title");
+	private static final List<Long> PERIODIC_UPLOAD_MINUTES = List.of(0L, 5L, 10L, 15L, 30L, 60L, 120L);
 	private final Screen lastScreen;
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this);
 	private Object shownState;
-	/** The settings as edited on this screen; kept across rebuilds and saved on close. */
-	private Settings edited = SharedWorlds.get().settings().current();
+	/** The Backup count as set on the slider; kept across rebuilds and saved on close, not on every drag step. */
+	private int backupCount = SharedWorlds.get().settings().current().backupCount();
 
 	public SharedWorldsSettingsScreen(Screen lastScreen) {
 		super(TITLE);
@@ -77,11 +83,31 @@ public class SharedWorldsSettingsScreen extends Screen {
 			}
 		}
 
+		content.addChild(periodicUploadButton());
 		content.addChild(new BackupCountSlider());
 
 		layout.addToFooter(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(200).build());
 		layout.arrangeElements();
 		layout.visitWidgets(this::addRenderableWidget);
+	}
+
+	/** Periodic upload interval while hosting, in minutes; 0 turns it off. Saved as soon as it changes. */
+	private CycleButton<Long> periodicUploadButton() {
+		SettingsFile settings = SharedWorlds.get().settings();
+		long current = settings.current().periodicUploadInterval().toMinutes();
+		TreeSet<Long> choices = new TreeSet<>(PERIODIC_UPLOAD_MINUTES);
+		choices.add(current);
+		return CycleButton.<Long>builder(minutes -> minutes == 0 ? CommonComponents.OPTION_OFF
+						: Component.translatable("world-gdrive-sync.settings.periodicUpload.minutes", minutes), current)
+				.withValues(List.copyOf(choices))
+				.withTooltip(minutes -> Tooltip.create(Component.translatable("world-gdrive-sync.settings.periodicUpload.tooltip")))
+				.create(0, 0, 200, 20, Component.translatable("world-gdrive-sync.settings.periodicUpload"), (button, minutes) -> {
+					try {
+						settings.update(settings.current().withPeriodicUploadInterval(Duration.ofMinutes(minutes)));
+					} catch (IOException e) {
+						WorldGDriveSync.LOGGER.warn("Couldn't save settings", e);
+					}
+				});
 	}
 
 	private MultiLineTextWidget text(Component message) {
@@ -107,9 +133,9 @@ public class SharedWorldsSettingsScreen extends Screen {
 	@Override
 	public void onClose() {
 		SettingsFile settings = SharedWorlds.get().settings();
-		if (!edited.equals(settings.current())) {
+		if (backupCount != settings.current().backupCount()) {
 			try {
-				settings.save(edited);
+				settings.update(settings.current().withBackupCount(backupCount));
 			} catch (IOException e) {
 				WorldGDriveSync.LOGGER.warn("Couldn't save settings", e);
 			}
@@ -122,7 +148,7 @@ public class SharedWorldsSettingsScreen extends Screen {
 		private static final int RANGE = Settings.MAX_BACKUP_COUNT - Settings.MIN_BACKUP_COUNT;
 
 		BackupCountSlider() {
-			super(0, 0, 200, DEFAULT_HEIGHT, Component.empty(), (double) (edited.backupCount() - Settings.MIN_BACKUP_COUNT) / RANGE);
+			super(0, 0, 200, DEFAULT_HEIGHT, Component.empty(), (double) (backupCount - Settings.MIN_BACKUP_COUNT) / RANGE);
 			updateMessage();
 		}
 
@@ -137,7 +163,7 @@ public class SharedWorldsSettingsScreen extends Screen {
 
 		@Override
 		protected void applyValue() {
-			edited = edited.withBackupCount(count());
+			backupCount = count();
 		}
 	}
 }

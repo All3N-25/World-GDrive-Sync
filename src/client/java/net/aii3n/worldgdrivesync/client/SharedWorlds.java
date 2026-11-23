@@ -2,6 +2,7 @@ package net.aii3n.worldgdrivesync.client;
 
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.drive.DriveCloudStore;
+import net.aii3n.worldgdrivesync.settings.SettingsFile;
 import com.google.common.base.Suppliers;
 import net.aii3n.worldgdrivesync.session.Player;
 import net.aii3n.worldgdrivesync.session.SessionCoordinator;
@@ -42,7 +43,8 @@ public final class SharedWorlds {
 
 	static void init() {
 		Path localCopies = FabricLoader.getInstance().getGameDir().resolve("sharedsaves");
-		SettingsFile settings = new SettingsFile(FabricLoader.getInstance().getConfigDir().resolve(WorldGDriveSync.MOD_ID).resolve("settings.properties"));
+		SettingsFile settings = new SettingsFile(
+				FabricLoader.getInstance().getConfigDir().resolve(WorldGDriveSync.MOD_ID).resolve("settings.properties"));
 		// Built on first use: the signed-in Minecraft profile isn't guaranteed to exist during mod init.
 		instance = new SharedWorlds(Suppliers.memoize(() -> {
 			User user = Minecraft.getInstance().getUser();
@@ -51,14 +53,14 @@ public final class SharedWorlds {
 		}), settings);
 	}
 
+	/** The player's settings, saved in the mod's config folder. */
+	public SettingsFile settings() {
+		return settings;
+	}
+
 	public static SharedWorlds get() {
 		if (instance == null) throw new IllegalStateException("SharedWorlds used before client init");
 		return instance;
-	}
-
-	/** The player's settings, read and saved on the client thread; the coordinator always sees the latest. */
-	public SettingsFile settings() {
-		return settings;
 	}
 
 	/** Runs {@code task} with the coordinator on the network thread. */

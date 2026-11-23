@@ -9,5 +9,7 @@ public class WorldGDriveSyncClient implements ClientModInitializer {
 		SharedWorlds.init();
 		TitleScreenButton.register();
 		HostingSession.register();
+		PendingUploadRetry.register();
+		PeriodicUpload.register();
 	}
 }
