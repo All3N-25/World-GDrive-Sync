@@ -167,7 +167,27 @@ public final class SessionCoordinator {
 	 * earliest Lock wins; the loser deletes their own and is told who is hosting.
 	 */
 	private PlayResult becomeHost(String worldId, ProgressListener progress) throws IOException {
-		cloud.writeLock(worldId, Lock.takenBy(me, clock.instant()));
+		Instant startedAt = clock.instant();
+		Optional<Lock> winner = takeLock(worldId, startedAt);
+		if (winner.isPresent()) return new PlayResult.Refused(winner.get());
+		try {
+			Optional<Backup> unmerged = bringLocalCopyUpToDate(worldId, progress);
+			markSessionOpen(worldId, startedAt);
+			return new PlayResult.Ready(localCopy(worldId).orElseThrow(), unmerged);
+		} catch (IOException | RuntimeException e) {
+			releaseLock(worldId);
+			throw e;
+		}
+	}
+
+	/**
+	 * Writes this player's Lock, waits for a simultaneous one to show up, and settles who won.
+	 *
+	 * @return empty if this player now holds the Lock; otherwise the winner's Lock (this player's own
+	 *         has been deleted again)
+	 */
+	private Optional<Lock> takeLock(String worldId, Instant startedAt) throws IOException {
+		cloud.writeLock(worldId, Lock.takenBy(me, startedAt));
 		try {
 			try {
 				clock.sleep(LOCK_SETTLE_TIME);
@@ -178,29 +198,77 @@ public final class SessionCoordinator {
 			Optional<Lock> winner = currentLock(worldId);
 			if (winner.isPresent() && !winner.get().heldBy(me)) {
 				releaseLock(worldId);
-				return new PlayResult.Refused(winner.get());
+				return winner;
 			}
-			return new PlayResult.Ready(bringLocalCopyUpToDate(worldId, progress));
+			return Optional.empty();
 		} catch (IOException | RuntimeException e) {
 			releaseLock(worldId);
 			throw e;
 		}
 	}
 
-	/** The Local Copy at the Current Revision, downloaded first if this computer's copy is older or missing. */
-	private LocalCopy bringLocalCopyUpToDate(String worldId, ProgressListener progress) throws IOException {
+	/**
+	 * Applies the Revision rules to this computer's Local Copy:
+	 * <ol>
+	 *   <li>at or past the Current Revision: open it as it is (after a crash, this resumes the
+	 *       crashed session's progress);</li>
+	 *   <li>older, with unsaved progress (a crashed session or a Pending Upload), so someone else
+	 *       uploaded since: upload it as an Unmerged Backup, then download the Current Save;</li>
+	 *   <li>older or missing otherwise: download the Current Save.</li>
+	 * </ol>
+	 *
+	 * @return the Unmerged Backup, if one was made
+	 */
+	private Optional<Backup> bringLocalCopyUpToDate(String worldId, ProgressListener progress) throws IOException {
 		WorldMetadata current = cloud.readMetadata(worldId)
 				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-		Optional<LocalCopy> local = localCopy(worldId);
-		if (local.isPresent() && local.get().revision() >= current.revision()) return local.get();
-		return download(worldId, current, progress);
+		Optional<LocalCopyRecord> record = LocalCopyRecord.read(localCopies.resolve(worldId));
+		if (record.isPresent() && record.get().revision() >= current.revision()) return Optional.empty();
+		Optional<Backup> unmerged = Optional.empty();
+		if (record.isPresent() && record.get().hasUnsavedProgress()) unmerged = Optional.of(keepAsUnmergedBackup(worldId, record.get(), progress));
+		download(worldId, current, progress);
+		return unmerged;
+	}
+
+	/**
+	 * Uploads the Local Copy into the Backups as an Unmerged Backup, labelled with this player and
+	 * their crashed session, without touching the Current Save. Then forgets that the Local Copy had
+	 * unsaved progress, so a failed download afterwards doesn't make a second Unmerged Backup.
+	 */
+	private Backup keepAsUnmergedBackup(String worldId, LocalCopyRecord record, ProgressListener progress) throws IOException {
+		Path folder = localCopies.resolve(worldId);
+		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
+		try {
+			WorldZip.zip(folder, zip, progress);
+			long size = Files.size(zip);
+			Instant now = clock.instant();
+			CrashedSession session = new CrashedSession(me.id(), me.name(), record.sessionStartedAt().orElse(now));
+			BackupLabel label = new BackupLabel(record.revision(), now, Optional.of(session));
+			Backup backup = cloud.uploadBackup(worldId, zip, label, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+			new LocalCopyRecord(record.revision()).write(folder);
+			pruneBackups(worldId);
+			return backup;
+		} finally {
+			Files.deleteIfExists(zip);
+		}
+	}
+
+	/**
+	 * Remembers in the Local Copy that a hosting session of it is open, until {@link #quit} uploads
+	 * it. A session resumed after a crash keeps the crashed session's start.
+	 */
+	private void markSessionOpen(String worldId, Instant startedAt) throws IOException {
+		Path folder = localCopies.resolve(worldId);
+		LocalCopyRecord record = LocalCopyRecord.read(folder).orElseThrow(() -> new IOException("No Local Copy of " + worldId));
+		if (record.sessionStartedAt().isPresent()) return;
+		record.withSessionStartedAt(Optional.of(startedAt)).write(folder);
 	}
 
 	/**
 	 * Replaces the Local Copy with the Current Save. The new copy is unpacked beside the old one and
 	 * swapped in only once complete, so a failed download leaves the old Local Copy as it was.
 	 */
-	private LocalCopy download(String worldId, WorldMetadata current, ProgressListener progress) throws IOException {
+	private void download(String worldId, WorldMetadata current, ProgressListener progress) throws IOException {
 		Files.createDirectories(localCopies);
 		Path staging = Files.createTempDirectory(localCopies, STAGING_PREFIX);
 		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
@@ -211,7 +279,6 @@ public final class SessionCoordinator {
 			Path folder = localCopies.resolve(worldId);
 			deleteRecursively(folder);
 			Files.move(staging, folder);
-			return new LocalCopy(folder, current.revision());
 		} finally {
 			Files.deleteIfExists(zip);
 			deleteRecursively(staging);
@@ -223,6 +290,14 @@ public final class SessionCoordinator {
 	 * backed out of a prompt, or the world failed to load). Nothing changed, so nothing is uploaded.
 	 */
 	public void leaveWithoutPlaying(String worldId) throws IOException {
+		// The session this Play opened is over with nothing to upload. A crashed session it resumed
+		// started before this Lock, and still holds unsaved progress, so that one stays open.
+		Optional<Lock> mine = cloud.readLocks(worldId).stream().filter(lock -> lock.heldBy(me)).findFirst();
+		Path folder = localCopies.resolve(worldId);
+		Optional<LocalCopyRecord> record = LocalCopyRecord.read(folder);
+		if (mine.isPresent() && record.isPresent() && record.get().sessionStartedAt().equals(Optional.of(mine.get().startedAt()))) {
+			record.get().withSessionStartedAt(Optional.empty()).write(folder);
+		}
 		releaseLock(worldId);
 	}
 
@@ -230,17 +305,23 @@ public final class SessionCoordinator {
 	 * Save-and-quit: uploads the Local Copy as the new Current Save, then releases the Lock. Call it
 	 * once the game has closed the world, so everything is on disk. The Lock is released only after
 	 * the upload succeeds. If it fails, this throws, the Lock is kept, and the Local Copy becomes a
-	 * Pending Upload (see {@link #retryPendingUpload}).
+	 * Pending Upload (see {@link #retryPendingUpload}). It also fails that way if this player no
+	 * longer holds the Lock (a friend Took Over): the Local Copy is then never uploaded over the new
+	 * Host's world, and becomes an Unmerged Backup later instead.
+	 *
+	 * @return the new Current Save's metadata
 	 */
-	public void quit(String worldId, ProgressListener progress) throws IOException {
+	public WorldMetadata quit(String worldId, ProgressListener progress) throws IOException {
 		LocalCopy local = localCopy(worldId).orElseThrow(() -> new IOException("No Local Copy of " + worldId + " to upload"));
+		WorldMetadata uploaded;
 		try {
-			upload(worldId, local.folder(), progress);
+			uploaded = upload(worldId, local.folder(), true, progress);
 		} catch (IOException | RuntimeException e) {
-			markPendingUpload(local, e);
+			markPendingUpload(local.folder(), e);
 			throw e;
 		}
 		releaseLock(worldId);
+		return uploaded;
 	}
 
 	/**
@@ -248,29 +329,36 @@ public final class SessionCoordinator {
 	 * Revision, clears the Pending Upload and releases the Lock, just like a normal quit. If it fails
 	 * again, this throws and the Lock and the Pending Upload are kept.
 	 *
-	 * <p>It never overwrites a newer Revision or uploads under another Host: if someone else holds
-	 * the Lock, or the cloud has moved past the Local Copy's Revision (someone Took Over), this
-	 * throws without uploading and the Pending Upload is kept for crash recovery on Play.
+	 * <p>It never overwrites a newer Revision or uploads under another Host. If the cloud has moved
+	 * past the Local Copy's Revision (someone Took Over and uploaded), the Pending Upload is kept as
+	 * an Unmerged Backup instead and the Local Copy replaced with the newer Revision; the Lock isn't
+	 * touched. If someone else holds the Lock but hasn't uploaded yet, this throws and the Pending
+	 * Upload is kept. If nobody holds the Lock (it was Taken Over and given up), this player takes it
+	 * again for the upload.
 	 */
-	public void retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
-		LocalCopy local = localCopy(worldId).filter(LocalCopy::pendingUpload)
+	public RetryResult retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
+		LocalCopyRecord record = LocalCopyRecord.read(localCopies.resolve(worldId)).filter(LocalCopyRecord::pendingUpload)
 				.orElseThrow(() -> new IOException("No Pending Upload of " + worldId + " on this computer"));
+		WorldMetadata current = cloud.readMetadata(worldId)
+				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
+		if (current.revision() > record.revision()) {
+			Backup unmerged = keepAsUnmergedBackup(worldId, record, progress);
+			download(worldId, current, progress);
+			return new RetryResult.KeptAsUnmergedBackup(unmerged);
+		}
 		Optional<Lock> held = currentLock(worldId);
+		if (held.isEmpty()) held = takeLock(worldId, clock.instant());
 		if (held.isPresent() && !held.get().heldBy(me)) {
 			throw new IOException(held.get().hostName() + " is hosting this world now, so your Pending Upload can't be uploaded");
 		}
-		WorldMetadata current = cloud.readMetadata(worldId)
-				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-		if (current.revision() > local.revision()) {
-			throw new IOException("Someone uploaded Revision " + current.revision() + " since, so your Pending Upload won't overwrite it");
-		}
-		quit(worldId, progress);
+		return new RetryResult.Uploaded(quit(worldId, progress));
 	}
 
 	/** Remembers in the Local Copy that it still has to be uploaded; {@code failure} is why. */
-	private static void markPendingUpload(LocalCopy local, Exception failure) {
+	private static void markPendingUpload(Path folder, Exception failure) {
 		try {
-			new LocalCopyRecord(local.revision(), true).write(local.folder());
+			LocalCopyRecord record = LocalCopyRecord.read(folder).orElseThrow(() -> new IOException("The Local Copy's record is gone"));
+			record.withPendingUpload(true).write(folder);
 		} catch (IOException e) {
 			// The upload failure stays the one reported; the Lock is kept either way.
 			failure.addSuppressed(e);
@@ -305,7 +393,7 @@ public final class SessionCoordinator {
 		Path folder = Files.createTempDirectory(localCopies, STAGING_PREFIX);
 		try {
 			snapshot.saveTo(folder);
-			return upload(worldId, folder, progress);
+			return upload(worldId, folder, false, progress);
 		} finally {
 			deleteRecursively(folder);
 		}
@@ -318,9 +406,11 @@ public final class SessionCoordinator {
 	 *
 	 * @param worldFolder the world to upload, already saved to disk and not being written to: the
 	 *                    Local Copy itself after the world has closed, or a snapshot of it
+	 * @param endsSession whether this is the session's final upload: the Local Copy then no longer
+	 *                    counts as having unsaved progress. A periodic upload leaves that as it is.
 	 * @return the new Current Save's metadata
 	 */
-	private WorldMetadata upload(String worldId, Path worldFolder, ProgressListener progress) throws IOException {
+	private WorldMetadata upload(String worldId, Path worldFolder, boolean endsSession, ProgressListener progress) throws IOException {
 		Files.createDirectories(localCopies);
 		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
 		try {
@@ -328,16 +418,38 @@ public final class SessionCoordinator {
 			long size = Files.size(zip);
 			WorldMetadata previous = cloud.readMetadata(worldId)
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
+			ensureStillHost(worldId, previous);
 
 			cloud.replaceCurrentSave(worldId, zip, BackupLabel.of(previous),
 					sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
 			cloud.writeMetadata(worldId, next);
-			new LocalCopyRecord(next.revision()).write(localCopies.resolve(worldId));
+			Path localFolder = localCopies.resolve(worldId);
+			LocalCopyRecord uploaded = LocalCopyRecord.read(localFolder).orElse(new LocalCopyRecord(next.revision()))
+					.withRevision(next.revision()).withPendingUpload(false);
+			if (endsSession) uploaded = uploaded.withSessionStartedAt(Optional.empty());
+			uploaded.write(localFolder);
 			pruneBackups(worldId);
 			return next;
 		} finally {
 			Files.deleteIfExists(zip);
+		}
+	}
+
+	/**
+	 * The guard on every upload: never upload over a newer Revision. Throws unless this player still
+	 * holds the Lock (a friend may have Taken Over while this game hung or lost its connection) and
+	 * the Current Save is still the Revision this Local Copy came from or last uploaded.
+	 */
+	private void ensureStillHost(String worldId, WorldMetadata current) throws IOException {
+		Optional<Lock> held = currentLock(worldId);
+		if (held.isEmpty() || !held.get().heldBy(me)) {
+			throw new IOException(held.map(lock -> lock.hostName() + " Took Over").orElse("Your Lock is gone")
+					+ ", so this upload won't replace the Shared World; your progress is kept on this computer");
+		}
+		Optional<LocalCopyRecord> local = LocalCopyRecord.read(localCopies.resolve(worldId));
+		if (local.isPresent() && current.revision() > local.get().revision()) {
+			throw new IOException("Someone uploaded Revision " + current.revision() + " since, so this upload won't overwrite it");
 		}
 	}
 
@@ -383,13 +495,14 @@ public final class SessionCoordinator {
 	}
 
 	/**
-	 * Deletes the oldest Backups until only the configured count remain. Best effort: the new
-	 * Current Save is already in place, so a failure here only leaves extra Backups, which the next
-	 * upload prunes.
+	 * Deletes the oldest Backups until only the configured count remain. Unmerged Backups don't count
+	 * and are never deleted: each holds a crashed session's progress that exists nowhere else, and
+	 * they are rare. Best effort: the new Current Save is already in place, so a failure here only
+	 * leaves extra Backups, which the next upload prunes.
 	 */
 	private void pruneBackups(String worldId) {
 		try {
-			List<Backup> newestFirst = backups(worldId);
+			List<Backup> newestFirst = backups(worldId).stream().filter(backup -> backup.unmerged().isEmpty()).toList();
 			int keep = settings.get().backupCount();
 			for (Backup old : newestFirst.subList(Math.min(keep, newestFirst.size()), newestFirst.size())) {
 				cloud.deleteBackup(worldId, old.id());

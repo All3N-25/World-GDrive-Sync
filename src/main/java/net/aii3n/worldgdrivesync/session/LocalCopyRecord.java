@@ -6,19 +6,45 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.Properties;
 
 /**
  * What a Local Copy remembers about itself, kept in a small file inside the world folder so it
  * moves and is replaced together with the world. Never zipped (see {@link WorldZip}).
+ *
+ * @param revision         the Revision this copy came from (or was last uploaded as)
+ * @param pendingUpload    a final upload of this copy failed and still has to happen
+ * @param sessionStartedAt set while a hosting session of this copy is open: from Play until the
+ *                         final upload succeeds. Still set when the game starts again means the
+ *                         session crashed (or the game was closed), so the copy may hold progress
+ *                         the cloud doesn't have, even if its Revision matches the cloud's (a
+ *                         periodic upload updates the Revision mid-session).
  */
-record LocalCopyRecord(int revision, boolean pendingUpload) {
+record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> sessionStartedAt) {
 	static final String FILE_NAME = "world-gdrive-sync.properties";
 
-	/** A record with nothing waiting to be uploaded. */
+	/** A record with nothing waiting to be uploaded and no open session. */
 	LocalCopyRecord(int revision) {
-		this(revision, false);
+		this(revision, false, Optional.empty());
+	}
+
+	/** Whether this copy may hold progress the cloud doesn't have: a crashed session or a Pending Upload. */
+	boolean hasUnsavedProgress() {
+		return pendingUpload || sessionStartedAt.isPresent();
+	}
+
+	LocalCopyRecord withRevision(int revision) {
+		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt);
+	}
+
+	LocalCopyRecord withPendingUpload(boolean pendingUpload) {
+		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt);
+	}
+
+	LocalCopyRecord withSessionStartedAt(Optional<Instant> sessionStartedAt) {
+		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt);
 	}
 
 	static Optional<LocalCopyRecord> read(Path worldFolder) {
@@ -28,7 +54,8 @@ record LocalCopyRecord(int revision, boolean pendingUpload) {
 		try (Reader in = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
 			properties.load(in);
 			return Optional.of(new LocalCopyRecord(Integer.parseInt(properties.getProperty("revision")),
-					Boolean.parseBoolean(properties.getProperty("pendingUpload"))));
+					Boolean.parseBoolean(properties.getProperty("pendingUpload")),
+					Optional.ofNullable(properties.getProperty("sessionStartedAt")).map(Instant::parse)));
 		} catch (IOException | RuntimeException e) {
 			return Optional.empty();
 		}
@@ -38,6 +65,7 @@ record LocalCopyRecord(int revision, boolean pendingUpload) {
 		Properties properties = new Properties();
 		properties.setProperty("revision", Integer.toString(revision));
 		if (pendingUpload) properties.setProperty("pendingUpload", "true");
+		sessionStartedAt.ifPresent(startedAt -> properties.setProperty("sessionStartedAt", startedAt.toString()));
 		try (Writer out = Files.newBufferedWriter(worldFolder.resolve(FILE_NAME), StandardCharsets.UTF_8)) {
 			properties.store(out, "World GDrive Sync: what this Local Copy came from");
 		}

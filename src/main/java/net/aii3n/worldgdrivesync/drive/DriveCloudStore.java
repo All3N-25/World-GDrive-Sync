@@ -173,6 +173,22 @@ public final class DriveCloudStore implements CloudStore {
 		return new Backup(oldId, previous);
 	}
 
+	/**
+	 * One resumable upload straight into {@code backups/}, tagged {@code t=backup} with its label.
+	 * Drive creates the file only when the upload completes, so a failed one leaves nothing behind.
+	 */
+	@Override
+	public Backup uploadBackup(String worldId, Path zip, BackupLabel label, LongConsumer bytesSent) throws IOException {
+		JsonObject metadata = new JsonObject();
+		metadata.addProperty("name", "backup-r" + label.revision() + "-" + label.savedAt().toString().replace(':', '-')
+				+ (label.unmerged().isPresent() ? "-unmerged" : "") + ".zip");
+		metadata.add("parents", single(backupsFolder(worldId)));
+		metadata.add("appProperties", backupProperties(label));
+		String id = string(resumableUpload(UPLOAD_API + "/files?uploadType=resumable&fields=id", "POST", metadata, zip, bytesSent), "id");
+		if (id == null) throw new IOException("Drive didn't say where the upload went");
+		return new Backup(id, label);
+	}
+
 	@Override
 	public List<Backup> listBackups(String worldId) throws IOException {
 		Optional<String> backupsId = child(worldId, "backups");

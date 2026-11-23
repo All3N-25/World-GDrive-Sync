@@ -42,6 +42,14 @@ public interface CloudStore {
 	 */
 	Backup replaceCurrentSave(String worldId, Path zip, BackupLabel previous, LongConsumer bytesSent) throws IOException;
 
+	/**
+	 * Stores {@code zip} straight into the world's Backups, labelled {@code label}, leaving the
+	 * Current Save alone. Used for an Unmerged Backup. A failed upload adds no Backup.
+	 *
+	 * @param bytesSent told how many bytes of the zip have been sent so far
+	 */
+	Backup uploadBackup(String worldId, Path zip, BackupLabel label, LongConsumer bytesSent) throws IOException;
+
 	/** Every Backup of the world, in no particular order. */
 	List<Backup> listBackups(String worldId) throws IOException;
 

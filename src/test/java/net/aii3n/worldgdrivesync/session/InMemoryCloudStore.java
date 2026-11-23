@@ -95,6 +95,15 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	@Override
+	public synchronized Backup uploadBackup(String worldId, Path zip, BackupLabel label, LongConsumer bytesSent) throws IOException {
+		Folder folder = folder(worldId);
+		byte[] bytes = send(zip, bytesSent);
+		Backup backup = new Backup("backup-" + nextId++, label);
+		folder.backups.put(backup.id(), new StoredBackup(backup, bytes));
+		return backup;
+	}
+
+	@Override
 	public synchronized List<Backup> listBackups(String worldId) throws IOException {
 		return folder(worldId).backups.values().stream().map(StoredBackup::backup).toList();
 	}
@@ -173,6 +182,11 @@ final class InMemoryCloudStore implements CloudStore {
 	/** From now on every download fails partway, like a dropped connection. */
 	void failDownloads() {
 		failDownloads = true;
+	}
+
+	/** The connection is back: downloads succeed again after {@link #failDownloads}. */
+	void downloadsWork() {
+		failDownloads = false;
 	}
 
 	/**
