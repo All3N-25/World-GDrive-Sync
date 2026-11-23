@@ -1,7 +1,9 @@
 package net.aii3n.worldgdrivesync.client.screen;
 
 import net.aii3n.worldgdrivesync.client.GoogleConnection;
+import net.aii3n.worldgdrivesync.client.SharedWorldLauncher;
 import net.aii3n.worldgdrivesync.client.SharedWorlds;
+import net.aii3n.worldgdrivesync.session.LocalCopy;
 import net.aii3n.worldgdrivesync.session.SharedWorld;
 import net.aii3n.worldgdrivesync.session.WorldStatus;
 import net.minecraft.ChatFormatting;
@@ -10,9 +12,11 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.ObjectSelectionList;
+import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.layouts.HeaderAndFooterLayout;
 import net.minecraft.client.gui.layouts.LinearLayout;
+import net.minecraft.client.gui.screens.AlertScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
@@ -21,6 +25,8 @@ import org.jspecify.annotations.Nullable;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * Lists every Shared World on the account with its status. Reads Drive each time the screen is
@@ -31,6 +37,9 @@ public class SharedWorldsScreen extends Screen {
 	private final Screen lastScreen;
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this, 33, 60);
 	private @Nullable Button gearButton;
+	private @Nullable Button playButton;
+	/** Set while Play looks up the Local Copy, so a second press doesn't open the world twice. */
+	private boolean opening;
 	private @Nullable WorldList list;
 	private boolean shownConnected;
 
@@ -88,19 +97,23 @@ public class SharedWorldsScreen extends Screen {
 		} else if (worlds.isEmpty()) {
 			layout.addToContents(text(Component.translatable("world-gdrive-sync.sharedWorlds.empty")));
 		} else {
-			list = layout.addToContents(new WorldList(minecraft, width, layout.getContentHeight(), layout.getHeaderHeight(), worlds));
+			list = layout.addToContents(new WorldList(minecraft, width, layout.getContentHeight(), layout.getHeaderHeight(), worlds, this::play));
 		}
 
 		LinearLayout footer = layout.addToFooter(LinearLayout.vertical().spacing(4));
 		footer.defaultCellSetting().alignHorizontallyCenter();
-		LinearLayout row = footer.addChild(LinearLayout.horizontal().spacing(8));
-		Button share = row.addChild(Button.builder(Component.translatable("world-gdrive-sync.sharedWorlds.share"),
+		LinearLayout topRow = footer.addChild(LinearLayout.horizontal().spacing(8));
+		playButton = topRow.addChild(Button.builder(Component.translatable("world-gdrive-sync.sharedWorlds.play"),
+				b -> playSelected()).width(150).build());
+		Button share = topRow.addChild(Button.builder(Component.translatable("world-gdrive-sync.sharedWorlds.share"),
 				b -> minecraft.gui.setScreen(new ShareWorldScreen(this))).width(150).build());
-		Button refresh = row.addChild(Button.builder(Component.translatable("world-gdrive-sync.sharedWorlds.refresh"),
+		LinearLayout bottomRow = footer.addChild(LinearLayout.horizontal().spacing(8));
+		Button refresh = bottomRow.addChild(Button.builder(Component.translatable("world-gdrive-sync.sharedWorlds.refresh"),
 				b -> refresh()).width(150).build());
+		bottomRow.addChild(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(150).build());
 		share.active = shownConnected;
 		refresh.active = shownConnected && (worlds != null || loadError != null);
-		footer.addChild(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(200).build());
+		updatePlayButton();
 
 		layout.arrangeElements();
 		layout.visitWidgets(this::addRenderableWidget);
@@ -122,8 +135,38 @@ public class SharedWorldsScreen extends Screen {
 		positionGear();
 	}
 
+	private void updatePlayButton() {
+		if (playButton != null) playButton.active = !opening && list != null && list.getSelected() != null;
+	}
+
+	private void playSelected() {
+		if (list != null && list.getSelected() != null) play(list.getSelected().world);
+	}
+
+	/**
+	 * Opens the world's Local Copy from {@code sharedsaves/}. No Lock or download yet: a world with no
+	 * Local Copy on this machine can't be played.
+	 */
+	private void play(SharedWorld world) {
+		if (opening) return;
+		opening = true;
+		updatePlayButton();
+		SharedWorlds.get().run(coordinator -> coordinator.localCopy(world.id())).whenCompleteAsync((found, error) -> {
+			opening = false;
+			Optional<LocalCopy> localCopy = error == null ? found : Optional.empty();
+			if (localCopy.isPresent()) {
+				SharedWorldLauncher.open(minecraft, localCopy.get(), this);
+			} else {
+				minecraft.gui.setScreen(new AlertScreen(() -> minecraft.gui.setScreen(this),
+						Component.translatable("world-gdrive-sync.play.noLocalCopy.title"),
+						Component.translatable("world-gdrive-sync.play.noLocalCopy", world.name())));
+			}
+		}, screenExecutor);
+	}
+
 	@Override
 	public void tick() {
+		updatePlayButton();
 		// Connecting or disconnecting happens elsewhere (settings, or a revoked sign-in found mid-call).
 		boolean connected = GoogleConnection.get().account().isConnected();
 		if (connected != shownConnected) {
@@ -154,9 +197,9 @@ public class SharedWorldsScreen extends Screen {
 	}
 
 	private static final class WorldList extends ObjectSelectionList<WorldList.Entry> {
-		WorldList(Minecraft minecraft, int width, int height, int y, List<SharedWorld> worlds) {
+		WorldList(Minecraft minecraft, int width, int height, int y, List<SharedWorld> worlds, Consumer<SharedWorld> play) {
 			super(minecraft, width, height, y, 36);
-			for (SharedWorld world : worlds) addEntry(new Entry(minecraft, world));
+			for (SharedWorld world : worlds) addEntry(new Entry(minecraft, world, play));
 		}
 
 		@Override
@@ -167,10 +210,18 @@ public class SharedWorldsScreen extends Screen {
 		static final class Entry extends ObjectSelectionList.Entry<Entry> {
 			private final Minecraft minecraft;
 			private final SharedWorld world;
+			private final Consumer<SharedWorld> play;
 
-			Entry(Minecraft minecraft, SharedWorld world) {
+			Entry(Minecraft minecraft, SharedWorld world, Consumer<SharedWorld> play) {
 				this.minecraft = minecraft;
 				this.world = world;
+				this.play = play;
+			}
+
+			@Override
+			public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+				if (doubleClick) play.accept(world);
+				return super.mouseClicked(event, doubleClick);
 			}
 
 			@Override
