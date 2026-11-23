@@ -1,8 +1,13 @@
 package net.aii3n.worldgdrivesync.client.screen;
 
+import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.client.GoogleConnection;
+import net.aii3n.worldgdrivesync.client.SharedWorlds;
 import net.aii3n.worldgdrivesync.google.SignIn;
+import net.aii3n.worldgdrivesync.settings.Settings;
+import net.aii3n.worldgdrivesync.settings.SettingsFile;
 import net.minecraft.ChatFormatting;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.layouts.HeaderAndFooterLayout;
@@ -10,16 +15,22 @@ import net.minecraft.client.gui.layouts.LinearLayout;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
+
+import java.io.IOException;
 
 /**
- * Mod settings. For now: connect the shared Google account through the system browser, see which
- * account is connected, and disconnect it.
+ * Mod settings: connect the shared Google account through the system browser, see which account
+ * is connected, and disconnect it; and the Shared World settings (how many Backups to keep). The
+ * settings are saved when the screen closes.
  */
 public class SharedWorldsSettingsScreen extends Screen {
 	private static final Component TITLE = Component.translatable("world-gdrive-sync.settings.title");
 	private final Screen lastScreen;
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this);
 	private Object shownState;
+	/** The settings as edited on this screen; kept across rebuilds and saved on close. */
+	private Settings edited = SharedWorlds.get().settings().current();
 
 	public SharedWorldsSettingsScreen(Screen lastScreen) {
 		super(TITLE);
@@ -66,6 +77,8 @@ public class SharedWorldsSettingsScreen extends Screen {
 			}
 		}
 
+		content.addChild(new BackupCountSlider());
+
 		layout.addToFooter(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(200).build());
 		layout.arrangeElements();
 		layout.visitWidgets(this::addRenderableWidget);
@@ -93,6 +106,38 @@ public class SharedWorldsSettingsScreen extends Screen {
 
 	@Override
 	public void onClose() {
+		SettingsFile settings = SharedWorlds.get().settings();
+		if (!edited.equals(settings.current())) {
+			try {
+				settings.save(edited);
+			} catch (IOException e) {
+				WorldGDriveSync.LOGGER.warn("Couldn't save settings", e);
+			}
+		}
 		minecraft.gui.setScreen(lastScreen);
+	}
+
+	/** Backups kept per Shared World, from {@link Settings#MIN_BACKUP_COUNT} to {@link Settings#MAX_BACKUP_COUNT}. */
+	private final class BackupCountSlider extends AbstractSliderButton {
+		private static final int RANGE = Settings.MAX_BACKUP_COUNT - Settings.MIN_BACKUP_COUNT;
+
+		BackupCountSlider() {
+			super(0, 0, 200, DEFAULT_HEIGHT, Component.empty(), (double) (edited.backupCount() - Settings.MIN_BACKUP_COUNT) / RANGE);
+			updateMessage();
+		}
+
+		private int count() {
+			return Settings.MIN_BACKUP_COUNT + Mth.floor(value * RANGE + 0.5);
+		}
+
+		@Override
+		protected void updateMessage() {
+			setMessage(Component.translatable("world-gdrive-sync.settings.backupCount", count()));
+		}
+
+		@Override
+		protected void applyValue() {
+			edited = edited.withBackupCount(count());
+		}
 	}
 }

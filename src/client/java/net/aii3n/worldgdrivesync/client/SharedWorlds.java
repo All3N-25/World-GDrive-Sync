@@ -1,9 +1,11 @@
 package net.aii3n.worldgdrivesync.client;
 
+import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.drive.DriveCloudStore;
 import com.google.common.base.Suppliers;
 import net.aii3n.worldgdrivesync.session.Player;
 import net.aii3n.worldgdrivesync.session.SessionCoordinator;
+import net.aii3n.worldgdrivesync.settings.SettingsFile;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.User;
 import net.fabricmc.loader.api.FabricLoader;
@@ -20,35 +22,43 @@ import java.util.function.Supplier;
 /**
  * The game's session coordinator, wired to Google Drive, the system clock and
  * {@code <gameDir>/sharedsaves/} (ADR-0002), plus the one background thread every Drive call
- * runs on, so the render thread never waits on the network.
+ * runs on, so the render thread never waits on the network. Also holds the player's settings.
  */
 public final class SharedWorlds {
 	private static @Nullable SharedWorlds instance;
 
 	private final Supplier<SessionCoordinator> coordinator;
+	private final SettingsFile settings;
 	private final ExecutorService network = Executors.newSingleThreadExecutor(task -> {
 		Thread thread = new Thread(task, "WGDS-Network");
 		thread.setDaemon(true);
 		return thread;
 	});
 
-	private SharedWorlds(Supplier<SessionCoordinator> coordinator) {
+	private SharedWorlds(Supplier<SessionCoordinator> coordinator, SettingsFile settings) {
 		this.coordinator = coordinator;
+		this.settings = settings;
 	}
 
 	static void init() {
 		Path localCopies = FabricLoader.getInstance().getGameDir().resolve("sharedsaves");
+		SettingsFile settings = new SettingsFile(FabricLoader.getInstance().getConfigDir().resolve(WorldGDriveSync.MOD_ID).resolve("settings.properties"));
 		// Built on first use: the signed-in Minecraft profile isn't guaranteed to exist during mod init.
 		instance = new SharedWorlds(Suppliers.memoize(() -> {
 			User user = Minecraft.getInstance().getUser();
 			return new SessionCoordinator(new DriveCloudStore(GoogleConnection.get().account()), InstantSource.system(),
-					localCopies, new Player(user.getProfileId().toString(), user.getName()));
-		}));
+					localCopies, new Player(user.getProfileId().toString(), user.getName()), settings::current);
+		}), settings);
 	}
 
 	public static SharedWorlds get() {
 		if (instance == null) throw new IllegalStateException("SharedWorlds used before client init");
 		return instance;
+	}
+
+	/** The player's settings, read and saved on the client thread; the coordinator always sees the latest. */
+	public SettingsFile settings() {
+		return settings;
 	}
 
 	/** Runs {@code task} with the coordinator on the network thread. */
