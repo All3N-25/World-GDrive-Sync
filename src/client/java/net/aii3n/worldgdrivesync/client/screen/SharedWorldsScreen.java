@@ -175,6 +175,8 @@ public class SharedWorldsScreen extends Screen {
 			case WorldStatus.Free free -> Component.translatable("world-gdrive-sync.status.free").withStyle(ChatFormatting.GREEN);
 			case WorldStatus.Hosted hosted -> Component.translatable("world-gdrive-sync.status.hosted",
 					hosted.host(), duration(Duration.between(hosted.since(), Instant.now()))).withStyle(ChatFormatting.GOLD);
+			case WorldStatus.Stale stale -> Component.translatable("world-gdrive-sync.status.stale",
+					stale.host(), duration(Duration.between(stale.lastSeen(), Instant.now()))).withStyle(ChatFormatting.RED);
 		};
 	}
 

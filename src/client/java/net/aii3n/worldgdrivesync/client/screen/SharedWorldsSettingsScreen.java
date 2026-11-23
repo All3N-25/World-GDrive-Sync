@@ -1,15 +1,25 @@
 package net.aii3n.worldgdrivesync.client.screen;
 
+import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.client.GoogleConnection;
+import net.aii3n.worldgdrivesync.client.ModSettings;
 import net.aii3n.worldgdrivesync.google.SignIn;
+import net.aii3n.worldgdrivesync.settings.SettingsFile;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.layouts.HeaderAndFooterLayout;
 import net.minecraft.client.gui.layouts.LinearLayout;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.util.List;
+import java.util.TreeSet;
 
 /**
  * Mod settings. For now: connect the shared Google account through the system browser, see which
@@ -17,6 +27,7 @@ import net.minecraft.network.chat.Component;
  */
 public class SharedWorldsSettingsScreen extends Screen {
 	private static final Component TITLE = Component.translatable("world-gdrive-sync.settings.title");
+	private static final List<Long> STALE_TIMEOUT_CHOICES = List.of(2L, 3L, 5L, 10L, 15L, 30L, 60L);
 	private final Screen lastScreen;
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this);
 	private Object shownState;
@@ -66,9 +77,29 @@ public class SharedWorldsSettingsScreen extends Screen {
 			}
 		}
 
+		content.addChild(staleTimeoutButton());
+
 		layout.addToFooter(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(200).build());
 		layout.arrangeElements();
 		layout.visitWidgets(this::addRenderableWidget);
+	}
+
+	/** How long a Lock may go without a Heartbeat before it shows as Stale. Saved on every change. */
+	private CycleButton<Long> staleTimeoutButton() {
+		SettingsFile file = ModSettings.get();
+		long current = file.settings().staleTimeout().toMinutes();
+		TreeSet<Long> choices = new TreeSet<>(STALE_TIMEOUT_CHOICES);
+		choices.add(current);
+		return CycleButton.builder((Long minutes) -> Component.translatable("world-gdrive-sync.settings.minutes", minutes), current)
+				.withValues(List.copyOf(choices))
+				.withTooltip(minutes -> Tooltip.create(Component.translatable("world-gdrive-sync.settings.staleTimeout.tooltip")))
+				.create(0, 0, 200, 20, Component.translatable("world-gdrive-sync.settings.staleTimeout"), (button, minutes) -> {
+					try {
+						file.save(file.settings().withStaleTimeout(Duration.ofMinutes(minutes)));
+					} catch (IOException e) {
+						WorldGDriveSync.LOGGER.warn("Couldn't save settings", e);
+					}
+				});
 	}
 
 	private MultiLineTextWidget text(Component message) {

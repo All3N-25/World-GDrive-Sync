@@ -3,6 +3,7 @@ package net.aii3n.worldgdrivesync.client;
 import net.aii3n.worldgdrivesync.drive.DriveCloudStore;
 import com.google.common.base.Suppliers;
 import net.aii3n.worldgdrivesync.session.Player;
+import net.aii3n.worldgdrivesync.session.SessionClock;
 import net.aii3n.worldgdrivesync.session.SessionCoordinator;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.User;
@@ -10,7 +11,6 @@ import net.fabricmc.loader.api.FabricLoader;
 import org.jspecify.annotations.Nullable;
 
 import java.nio.file.Path;
-import java.time.InstantSource;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -38,11 +38,12 @@ public final class SharedWorlds {
 
 	static void init() {
 		Path localCopies = FabricLoader.getInstance().getGameDir().resolve("sharedsaves");
+		ModSettings.init();
 		// Built on first use: the signed-in Minecraft profile isn't guaranteed to exist during mod init.
 		instance = new SharedWorlds(Suppliers.memoize(() -> {
 			User user = Minecraft.getInstance().getUser();
-			return new SessionCoordinator(new DriveCloudStore(GoogleConnection.get().account()), InstantSource.system(),
-					localCopies, new Player(user.getProfileId().toString(), user.getName()));
+			return new SessionCoordinator(new DriveCloudStore(GoogleConnection.get().account()), SessionClock.system(),
+					localCopies, new Player(user.getProfileId().toString(), user.getName()), ModSettings.get()::settings);
 		}));
 	}
 

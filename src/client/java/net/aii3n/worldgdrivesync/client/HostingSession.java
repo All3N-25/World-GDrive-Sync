@@ -32,7 +32,7 @@ public final class HostingSession {
 	}
 
 	private static @Nullable Session opening;
-	private static @Nullable Session hosting;
+	private static volatile @Nullable Session hosting;
 	private static volatile @Nullable Session finalUploadDue;
 
 	private HostingSession() {
@@ -62,6 +62,12 @@ public final class HostingSession {
 			});
 			minecraft.gui.setScreen(onCancel);
 		});
+	}
+
+	/** The id of the Shared World this player is hosting right now, or null. */
+	static @Nullable String hostedWorldId() {
+		Session session = hosting;
+		return session == null ? null : session.worldId();
 	}
 
 	// Server thread.
