@@ -6,6 +6,7 @@ public class WorldGDriveSyncClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
 		GoogleConnection.init();
+		SharedWorlds.init();
 		TitleScreenButton.register();
 	}
 }
