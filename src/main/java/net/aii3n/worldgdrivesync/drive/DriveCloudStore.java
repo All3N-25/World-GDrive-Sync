@@ -389,24 +389,44 @@ public final class DriveCloudStore implements CloudStore {
 
 	@Override
 	public void writeLock(String worldId, Lock lock) throws IOException {
+		Optional<String> existing = lockFile(worldId, lock.hostId());
+		if (existing.isPresent()) {
+			updateLockFile(existing.get(), lock);
+		} else {
+			JsonObject properties = tag("lock");
+			properties.addProperty("h", lock.hostId());
+			createSmallFile("lock-" + lock.hostId() + ".json", worldId, properties, "application/json", lockJson(lock));
+		}
+	}
+
+	/** Rewrites the Lock file's content by its file id, so a file deleted meanwhile is never re-created. */
+	@Override
+	public boolean refreshLock(String worldId, Lock lock) throws IOException {
+		Optional<String> existing = lockFile(worldId, lock.hostId());
+		if (existing.isEmpty()) return false;
+		try {
+			updateLockFile(existing.get(), lock);
+			return true;
+		} catch (FileNotFoundException e) {
+			return false; // Deleted since the search: a friend Took Over.
+		}
+	}
+
+	private void updateLockFile(String fileId, Lock lock) throws IOException {
+		byte[] content = lockJson(lock);
+		send(token -> HttpRequest.newBuilder(URI.create(UPLOAD_API + "/files/" + fileId + "?uploadType=media&fields=id"))
+				.header("Authorization", "Bearer " + token)
+				.header("Content-Type", "application/json")
+				.method("PATCH", HttpRequest.BodyPublishers.ofByteArray(content)));
+	}
+
+	private static byte[] lockJson(Lock lock) {
 		JsonObject json = new JsonObject();
 		json.addProperty("hostId", lock.hostId());
 		json.addProperty("hostName", lock.hostName());
 		json.addProperty("startedAt", lock.startedAt().toString());
 		json.addProperty("lastHeartbeat", lock.lastHeartbeat().toString());
-		byte[] content = json.toString().getBytes(StandardCharsets.UTF_8);
-
-		Optional<String> existing = lockFile(worldId, lock.hostId());
-		if (existing.isPresent()) {
-			send(token -> HttpRequest.newBuilder(URI.create(UPLOAD_API + "/files/" + existing.get() + "?uploadType=media&fields=id"))
-					.header("Authorization", "Bearer " + token)
-					.header("Content-Type", "application/json")
-					.method("PATCH", HttpRequest.BodyPublishers.ofByteArray(content)));
-		} else {
-			JsonObject properties = tag("lock");
-			properties.addProperty("h", lock.hostId());
-			createSmallFile("lock-" + lock.hostId() + ".json", worldId, properties, "application/json", content);
-		}
+		return json.toString().getBytes(StandardCharsets.UTF_8);
 	}
 
 	@Override

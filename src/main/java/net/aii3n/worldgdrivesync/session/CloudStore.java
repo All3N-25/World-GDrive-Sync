@@ -86,10 +86,18 @@ public interface CloudStore {
 	List<Lock> readLocks(String worldId) throws IOException;
 
 	/**
-	 * Creates or replaces the Lock of {@code lock.hostId()}, leaving other players' Locks alone. A
-	 * replaced Lock (a Heartbeat) keeps its place in {@link #readLocks}'s order.
+	 * Creates the Lock of {@code lock.hostId()}, or replaces it if that player already has one,
+	 * leaving other players' Locks alone. Used to take the Lock, never for a Heartbeat.
 	 */
 	void writeLock(String worldId, Lock lock) throws IOException;
+
+	/**
+	 * Updates the existing Lock of {@code lock.hostId()} in place (a Heartbeat); it keeps its place in
+	 * {@link #readLocks}'s order. Never creates a Lock: if that Lock is gone, nothing is written.
+	 *
+	 * @return whether the Lock still existed and was updated
+	 */
+	boolean refreshLock(String worldId, Lock lock) throws IOException;
 
 	/** Deletes the Lock of {@code hostId}, if there is one. */
 	void deleteLock(String worldId, String hostId) throws IOException;

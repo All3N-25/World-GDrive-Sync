@@ -455,16 +455,16 @@ public final class SessionCoordinator {
 
 	/**
 	 * Heartbeat: refreshes this player's Lock so friends see they are still hosting. The game calls it
-	 * every minute while hosting. If the Lock is gone (a friend Took Over after it went Stale), it is
-	 * not put back.
+	 * every minute while hosting. Only ever updates this player's Lock in place: if it is gone (a
+	 * friend Took Over after it went Stale), even while this Heartbeat is being sent, it is not put
+	 * back.
 	 *
-	 * @return whether this player still holds the Lock
+	 * @return whether this player still holds the Lock that counts (the earliest)
 	 */
 	public boolean heartbeat(String worldId) throws IOException {
-		Optional<Lock> mine = cloud.readLocks(worldId).stream().filter(lock -> lock.heldBy(me)).findFirst();
-		if (mine.isEmpty()) return false;
-		cloud.writeLock(worldId, mine.get().heartbeatAt(clock.instant()));
-		return true;
+		Optional<Lock> current = currentLock(worldId);
+		if (current.isEmpty() || !current.get().heldBy(me)) return false;
+		return cloud.refreshLock(worldId, current.get().heartbeatAt(clock.instant()));
 	}
 
 	/** A Shared World's Backups, newest first. */

@@ -343,6 +343,34 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void aHeartbeatNeverPutsBackALockTakenOverWhileItWasBeingSent(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		// Alice's game wakes up and sends a Heartbeat; Bob's Takeover lands between its read and its write.
+		cloud.beforeNextLockWrite(() -> bob.takeOver(shared.id(), ProgressListener.NONE));
+
+		assertFalse(coordinator().heartbeat(shared.id()));
+
+		assertEquals(List.of("Bob"), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void aHeartbeatReportsTheLockLostWhenSomeoneElsesLockIsEarlier() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		// Somehow Bob's Lock now counts and Alice's is a later one, still lying around.
+		cloud.deleteLock(shared.id(), ALICE.id());
+		cloud.writeLock(shared.id(), Lock.takenBy(BOB, clock.instant()));
+		cloud.writeLock(shared.id(), Lock.takenBy(ALICE, clock.instant()));
+
+		assertFalse(coordinator().heartbeat(shared.id()));
+
+		assertEquals(new WorldStatus.Hosted("Bob", SHARED_AT), coordinator().listSharedWorlds().getFirst().status());
+	}
+
+	@Test
 	void playOnAStaleWorldOffersTakeoverAndWaitingChangesNothing(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		coordinator().play(shared.id(), ProgressListener.NONE);

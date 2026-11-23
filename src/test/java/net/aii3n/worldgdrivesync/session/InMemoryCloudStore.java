@@ -156,10 +156,23 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized void writeLock(String worldId, Lock lock) throws IOException {
+		runHook();
+		folder(worldId).locks.put(lock.hostId(), lock);
+	}
+
+	@Override
+	public synchronized boolean refreshLock(String worldId, Lock lock) throws IOException {
+		runHook();
+		Map<String, Lock> locks = folder(worldId).locks;
+		if (!locks.containsKey(lock.hostId())) return false;
+		locks.put(lock.hostId(), lock);
+		return true;
+	}
+
+	private void runHook() throws IOException {
 		Hook hook = beforeNextLockWrite;
 		beforeNextLockWrite = null;
 		if (hook != null) hook.run();
-		folder(worldId).locks.put(lock.hostId(), lock);
 	}
 
 	@Override
@@ -190,8 +203,8 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	/**
-	 * Runs {@code hook} just before the next Lock is written, as if another player's calls landed
-	 * between this player reading the Locks and writing theirs.
+	 * Runs {@code hook} just before the next Lock is written or refreshed, as if another player's
+	 * calls landed between this player reading the Locks and writing theirs.
 	 */
 	synchronized void beforeNextLockWrite(Hook hook) {
 		beforeNextLockWrite = hook;
