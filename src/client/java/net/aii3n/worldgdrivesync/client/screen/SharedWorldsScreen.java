@@ -36,6 +36,7 @@ public class SharedWorldsScreen extends Screen {
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this, 33, 60);
 	private @Nullable Button gearButton;
 	private @Nullable Button playButton;
+	private @Nullable Button backupsButton;
 	private @Nullable WorldList list;
 	private boolean shownConnected;
 
@@ -105,11 +106,14 @@ public class SharedWorldsScreen extends Screen {
 				b -> minecraft.gui.setScreen(new ShareWorldScreen(this))).width(150).build());
 		LinearLayout bottomRow = footer.addChild(LinearLayout.horizontal().spacing(8));
 		Button refresh = bottomRow.addChild(Button.builder(Component.translatable("world-gdrive-sync.sharedWorlds.refresh"),
-				b -> refresh()).width(150).build());
-		bottomRow.addChild(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(150).build());
+				b -> refresh()).width(96).build());
+		backupsButton = bottomRow.addChild(Button.builder(Component.translatable("world-gdrive-sync.sharedWorlds.backups"),
+				b -> openBackups()).width(96).build());
+		bottomRow.addChild(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(100).build());
 		share.active = shownConnected;
 		refresh.active = shownConnected && (worlds != null || loadError != null);
 		updatePlayButton();
+		updateBackupsButton();
 
 		layout.arrangeElements();
 		layout.visitWidgets(this::addRenderableWidget);
@@ -140,6 +144,14 @@ public class SharedWorldsScreen extends Screen {
 				? "world-gdrive-sync.sharedWorlds.retry" : "world-gdrive-sync.sharedWorlds.play"));
 	}
 
+	private void updateBackupsButton() {
+		if (backupsButton != null) backupsButton.active = list != null && list.getSelected() != null;
+	}
+
+	private void openBackups() {
+		if (list != null && list.getSelected() != null) minecraft.gui.setScreen(new BackupsScreen(this, list.getSelected().world));
+	}
+
 	private void playSelected() {
 		if (list != null && list.getSelected() != null) play(list.getSelected().world);
 	}
@@ -159,6 +171,7 @@ public class SharedWorldsScreen extends Screen {
 	@Override
 	public void tick() {
 		updatePlayButton();
+		updateBackupsButton();
 		// Connecting or disconnecting happens elsewhere (settings, or a revoked sign-in found mid-call).
 		boolean connected = GoogleConnection.get().account().isConnected();
 		if (connected != shownConnected) {

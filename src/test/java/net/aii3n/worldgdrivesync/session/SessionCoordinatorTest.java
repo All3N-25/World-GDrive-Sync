@@ -704,6 +704,79 @@ class SessionCoordinatorTest {
 		assertEquals(List.of(2, 1), friend(bobsSharedsaves).backups(shared.id()).stream().map(Backup::revision).toList());
 	}
 
+	// --- Restoring a Backup ---
+
+	@Test
+	void restoreIsRefusedNamingTheHostWhileSomeoneHoldsTheLock(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(coordinator(), shared.id(), "chunks with Alice's house");
+		Backup backup = coordinator().backups(shared.id()).getFirst();
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+
+		RestoreResult result = bob.restoreBackup(shared.id(), backup.id());
+
+		RestoreResult.Refused refused = assertInstanceOf(RestoreResult.Refused.class, result);
+		assertEquals("Alice", refused.heldBy().hostName());
+		assertEquals(2, cloud.metadata(shared.id()).revision());
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks with Alice's house"), cloud.currentSaveEntries(shared.id()));
+		assertEquals(List.of(backup), bob.backups(shared.id()));
+	}
+
+	@Test
+	void restoringMakesTheBackupTheCurrentSaveAtANewRevisionAndKeepsTheReplacedOneAsABackup(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(coordinator(), shared.id(), "chunks with Alice's house");
+		hostASession(coordinator(), shared.id(), "chunks after the creeper");
+		Backup beforeTheCreeper = coordinator().backups(shared.id()).getFirst();
+		clock.advance(Duration.ofMinutes(5));
+		Instant restoredAt = clock.instant();
+		SessionCoordinator bob = friend(bobsSharedsaves);
+
+		RestoreResult result = bob.restoreBackup(shared.id(), beforeTheCreeper.id());
+
+		RestoreResult.Restored restored = assertInstanceOf(RestoreResult.Restored.class, result);
+		assertEquals(new WorldMetadata(4, restoredAt), restored.current());
+		assertEquals(new WorldMetadata(4, restoredAt), cloud.metadata(shared.id()));
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks with Alice's house"), cloud.currentSaveEntries(shared.id()));
+		// The creeper world (Revision 3) is a Backup now, so the restore can be undone.
+		Backup creeper = bob.backups(shared.id()).getFirst();
+		assertEquals(restored.replaced(), creeper);
+		assertEquals(3, creeper.revision());
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks after the creeper"), cloud.backupEntries(shared.id(), creeper.id()));
+		// The restored Backup moved out of the Backups list; Revision 1 is still there.
+		assertEquals(List.of(3, 1), bob.backups(shared.id()).stream().map(Backup::revision).toList());
+		assertEquals(WorldStatus.FREE, bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void afterARestoreAnotherPlayersNextPlayDownloadsTheRestoredWorld(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(coordinator(), shared.id(), "chunks after the creeper");
+		Backup original = coordinator().backups(shared.id()).getFirst();
+		friend(bobsSharedsaves).restoreBackup(shared.id(), original.id());
+
+		// Alice's Local Copy is Revision 2, the creeper world; the restore is Revision 3.
+		LocalCopy local = assertInstanceOf(PlayResult.Ready.class, coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+
+		assertEquals(3, local.revision());
+		assertEquals("chunks", Files.readString(local.folder().resolve("region/r.0.0.mca")));
+	}
+
+	@Test
+	void restoreIsRefusedEvenWhenTheLockIsLongStale(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(coordinator(), shared.id(), "chunks with Alice's house");
+		Backup backup = coordinator().backups(shared.id()).getFirst();
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofDays(3)); // Alice crashed: no Heartbeat for days.
+
+		RestoreResult result = friend(bobsSharedsaves).restoreBackup(shared.id(), backup.id());
+
+		assertEquals("Alice", assertInstanceOf(RestoreResult.Refused.class, result).heldBy().hostName());
+		assertEquals(2, cloud.metadata(shared.id()).revision());
+	}
+
 	/** Plays a whole session as {@code player}: Play, change the world, an hour later save and quit. */
 	private void hostASession(SessionCoordinator player, String worldId, String chunks) throws IOException {
 		LocalCopy local = ((PlayResult.Ready) player.play(worldId, ProgressListener.NONE)).localCopy();

@@ -45,6 +45,15 @@ public interface CloudStore {
 	/** Every Backup of the world, in no particular order. */
 	List<Backup> listBackups(String worldId) throws IOException;
 
+	/**
+	 * Makes Backup {@code backupId} the world's Current Save and moves the previous Current Save into
+	 * the world's Backups, labelled {@code previous}. The restored Backup leaves the Backups. Nothing
+	 * is re-uploaded.
+	 *
+	 * @return the Backup the previous Current Save became
+	 */
+	Backup restoreBackup(String worldId, String backupId, BackupLabel previous) throws IOException;
+
 	/** Deletes one Backup for good. */
 	void deleteBackup(String worldId, String backupId) throws IOException;
 

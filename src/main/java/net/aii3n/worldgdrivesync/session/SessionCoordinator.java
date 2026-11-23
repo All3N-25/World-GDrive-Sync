@@ -363,6 +363,26 @@ public final class SessionCoordinator {
 	}
 
 	/**
+	 * Restores a Backup: the previous Current Save becomes a Backup, so the restore can be undone,
+	 * and the chosen Backup becomes the Current Save at the next Revision, so every player's next
+	 * Play downloads it. Refused, changing nothing, while anyone holds a Lock, fresh or Stale: a
+	 * Host's later upload would replace the restored world, and a crashed Host's progress would be
+	 * lost from view.
+	 */
+	public RestoreResult restoreBackup(String worldId, String backupId) throws IOException {
+		Optional<Lock> held = cloud.readLocks(worldId).stream().min(Comparator.comparing(Lock::startedAt));
+		if (held.isPresent()) return new RestoreResult.Refused(held.get());
+		WorldMetadata previous = cloud.readMetadata(worldId)
+				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
+
+		Backup replaced = cloud.restoreBackup(worldId, backupId, BackupLabel.of(previous));
+		WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
+		cloud.writeMetadata(worldId, next);
+		pruneBackups(worldId);
+		return new RestoreResult.Restored(next, replaced);
+	}
+
+	/**
 	 * Deletes the oldest Backups until only the configured count remain. Best effort: the new
 	 * Current Save is already in place, so a failure here only leaves extra Backups, which the next
 	 * upload prunes.
