@@ -3,12 +3,16 @@ package net.aii3n.worldgdrivesync.session;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
+
+import net.aii3n.worldgdrivesync.settings.Settings;
 
 /**
  * Owns every Shared World rule: sharing, listing with status, and (in later tickets) Play, Locks,
@@ -25,6 +29,7 @@ public final class SessionCoordinator {
 	private final InstantSource clock;
 	private final Path localCopies;
 	private final Player me;
+	private final Supplier<Settings> settings;
 
 	/**
 	 * @param cloud       where Shared Worlds are stored
@@ -34,10 +39,19 @@ public final class SessionCoordinator {
 	 * @param me          the player on this computer, who becomes Host when they press Play
 	 */
 	public SessionCoordinator(CloudStore cloud, InstantSource clock, Path localCopies, Player me) {
+		this(cloud, clock, localCopies, me, () -> Settings.DEFAULTS);
+	}
+
+	/**
+	 * @param settings the player's current settings, read each time one is needed, so changes take
+	 *                 effect without rebuilding the coordinator
+	 */
+	public SessionCoordinator(CloudStore cloud, InstantSource clock, Path localCopies, Player me, Supplier<Settings> settings) {
 		this.cloud = cloud;
 		this.clock = clock;
 		this.localCopies = localCopies;
 		this.me = me;
+		this.settings = settings;
 	}
 
 	/**
@@ -160,6 +174,40 @@ public final class SessionCoordinator {
 		LocalCopy local = localCopy(worldId).orElseThrow(() -> new IOException("No Local Copy of " + worldId + " to upload"));
 		upload(worldId, local.folder(), progress);
 		releaseLock(worldId);
+	}
+
+	/**
+	 * Whether this player is hosting the world and a periodic upload is due: periodic upload is
+	 * enabled and a whole interval has passed since the later of the last upload and the start of
+	 * hosting. Reads the cloud store, so check it now and then rather than every tick.
+	 */
+	public boolean periodicUploadDue(String worldId) throws IOException {
+		Settings current = settings.get();
+		if (!current.periodicUploadEnabled()) return false;
+		Optional<Lock> lock = currentLock(worldId);
+		if (lock.isEmpty() || !lock.get().heldBy(me)) return false;
+		Instant since = lock.get().startedAt();
+		Optional<WorldMetadata> metadata = cloud.readMetadata(worldId);
+		if (metadata.isPresent() && metadata.get().savedAt().isAfter(since)) since = metadata.get().savedAt();
+		return !clock.instant().isBefore(since.plus(current.periodicUploadInterval()));
+	}
+
+	/**
+	 * Uploads the world while it is being hosted, as the next Revision. The Host keeps the Lock and
+	 * nobody is kicked. {@code snapshot} is asked to save the open world and copy it into a folder
+	 * this method then uploads and deletes.
+	 *
+	 * @return the new Current Save's metadata
+	 */
+	public WorldMetadata periodicUpload(String worldId, WorldSnapshot snapshot, ProgressListener progress) throws IOException {
+		Files.createDirectories(localCopies);
+		Path folder = Files.createTempDirectory(localCopies, STAGING_PREFIX);
+		try {
+			snapshot.saveTo(folder);
+			return upload(worldId, folder, progress);
+		} finally {
+			deleteRecursively(folder);
+		}
 	}
 
 	/**
