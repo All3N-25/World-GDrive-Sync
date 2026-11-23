@@ -6,8 +6,11 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.aii3n.worldgdrivesync.google.GoogleAccount;
 import net.aii3n.worldgdrivesync.google.GoogleAuthException;
+import net.aii3n.worldgdrivesync.session.Backup;
+import net.aii3n.worldgdrivesync.session.BackupLabel;
 import net.aii3n.worldgdrivesync.session.CloudStore;
 import net.aii3n.worldgdrivesync.session.CloudWorld;
+import net.aii3n.worldgdrivesync.session.CrashedSession;
 import net.aii3n.worldgdrivesync.session.Lock;
 import net.aii3n.worldgdrivesync.session.WorldMetadata;
 
@@ -43,6 +46,9 @@ import java.util.function.LongConsumer;
  *     current.zip               Current Save  t=current
  *     metadata.json             {"revision":1,"savedAt":"..."}  t=meta
  *     lock-&lt;host id&gt;.json       one per Lock  t=lock, h=&lt;host id&gt;
+ *     incoming.zip              a replacing upload in progress  t=incoming
+ *     backups/                  folder        t=backups
+ *       backup-r&lt;rev&gt;-&lt;savedAt&gt;.zip   one per Backup  t=backup, r, s (+ uh, un, us if Unmerged)
  * </pre>
  */
 public final class DriveCloudStore implements CloudStore {
@@ -128,6 +134,106 @@ public final class DriveCloudStore implements CloudStore {
 			sessionStart = UPLOAD_API + "/files?uploadType=resumable&fields=id";
 			method = "POST";
 		}
+		resumableUpload(sessionStart, method, metadata, zip, bytesSent);
+	}
+
+	/**
+	 * Uploads the new zip as a separate file tagged {@code t=incoming}, and only once it is complete
+	 * moves the old {@code current.zip} into {@code backups/} (renamed, re-tagged {@code t=backup}
+	 * with its label) and tags the new file {@code t=current}. Leftover incoming files from an
+	 * earlier failed attempt are deleted first.
+	 */
+	@Override
+	public Backup replaceCurrentSave(String worldId, Path zip, BackupLabel previous, LongConsumer bytesSent) throws IOException {
+		String oldId = child(worldId, "current").orElseThrow(() -> new IOException("World " + worldId + " has no Current Save to replace"));
+		for (JsonObject leftover : search("'" + worldId + "' in parents and " + tagged("incoming"))) {
+			deleteFile(string(leftover, "id"));
+		}
+
+		JsonObject metadata = new JsonObject();
+		metadata.addProperty("name", "incoming.zip");
+		metadata.add("parents", single(worldId));
+		metadata.add("appProperties", tag("incoming"));
+		String newId = string(resumableUpload(UPLOAD_API + "/files?uploadType=resumable&fields=id", "POST", metadata, zip, bytesSent), "id");
+		if (newId == null) throw new IOException("Drive didn't say where the upload went");
+
+		JsonObject backup = new JsonObject();
+		backup.addProperty("name", "backup-r" + previous.revision() + "-" + previous.savedAt().toString().replace(':', '-') + ".zip");
+		backup.add("appProperties", backupProperties(previous));
+		String backupsId = backupsFolder(worldId);
+		patch(API + "/files/" + oldId + "?addParents=" + enc(backupsId) + "&removeParents=" + enc(worldId) + "&fields=id", backup);
+
+		JsonObject current = new JsonObject();
+		current.addProperty("name", "current.zip");
+		current.add("appProperties", tag("current"));
+		patch(API + "/files/" + newId + "?fields=id", current);
+		return new Backup(oldId, previous);
+	}
+
+	@Override
+	public List<Backup> listBackups(String worldId) throws IOException {
+		Optional<String> backupsId = child(worldId, "backups");
+		if (backupsId.isEmpty()) return List.of();
+		List<Backup> backups = new ArrayList<>();
+		for (JsonObject file : search("'" + backupsId.get() + "' in parents and " + tagged("backup"))) {
+			try {
+				backups.add(new Backup(string(file, "id"), backupLabel(file.getAsJsonObject("appProperties"))));
+			} catch (RuntimeException e) {
+				throw new IOException("Unreadable Backup in world " + worldId, e);
+			}
+		}
+		return backups;
+	}
+
+	@Override
+	public void deleteBackup(String worldId, String backupId) throws IOException {
+		deleteFile(backupId);
+	}
+
+	/**
+	 * A Backup's label as short appProperties (each key and value together must fit in 124 bytes):
+	 * {@code r} Revision, {@code s} savedAt; for an Unmerged Backup also {@code uh} host id,
+	 * {@code un} host name, {@code us} session start.
+	 */
+	private static JsonObject backupProperties(BackupLabel label) {
+		JsonObject properties = tag("backup");
+		properties.addProperty("r", Integer.toString(label.revision()));
+		properties.addProperty("s", label.savedAt().toString());
+		label.unmerged().ifPresent(session -> {
+			properties.addProperty("uh", session.hostId());
+			properties.addProperty("un", session.hostName());
+			properties.addProperty("us", session.startedAt().toString());
+		});
+		return properties;
+	}
+
+	private static BackupLabel backupLabel(JsonObject properties) {
+		Optional<CrashedSession> unmerged = properties.has("uh")
+				? Optional.of(new CrashedSession(string(properties, "uh"), string(properties, "un"), Instant.parse(string(properties, "us"))))
+				: Optional.empty();
+		return new BackupLabel(Integer.parseInt(string(properties, "r")), Instant.parse(string(properties, "s")), unmerged);
+	}
+
+	private String backupsFolder(String worldId) throws IOException {
+		Optional<String> existing = child(worldId, "backups");
+		return existing.isPresent() ? existing.get() : string(createFolder("backups", worldId, "backups"), "id");
+	}
+
+	private void patch(String url, JsonObject body) throws IOException {
+		send(token -> HttpRequest.newBuilder(URI.create(url))
+				.header("Authorization", "Bearer " + token)
+				.header("Content-Type", "application/json; charset=UTF-8")
+				.method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString())));
+	}
+
+	private void deleteFile(String fileId) throws IOException {
+		send(token -> HttpRequest.newBuilder(URI.create(API + "/files/" + fileId))
+				.header("Authorization", "Bearer " + token).DELETE());
+	}
+
+	/** Starts a resumable upload session and sends the zip through it; returns Drive's answer for the finished file. */
+	private JsonObject resumableUpload(String sessionStart, String method, JsonObject metadata, Path zip, LongConsumer bytesSent) throws IOException {
+		long size = Files.size(zip);
 		HttpResponse<byte[]> started = send(token -> HttpRequest.newBuilder(URI.create(sessionStart))
 				.header("Authorization", "Bearer " + token)
 				.header("Content-Type", "application/json; charset=UTF-8")
@@ -136,7 +242,7 @@ public final class DriveCloudStore implements CloudStore {
 				.method(method, HttpRequest.BodyPublishers.ofString(metadata.toString())));
 		URI session = started.headers().firstValue("Location").map(URI::create)
 				.orElseThrow(() -> new IOException("Drive didn't start the upload"));
-		new ResumableUpload(session, zip, size, bytesSent).run();
+		return new ResumableUpload(session, zip, size, bytesSent).run();
 	}
 
 	@Override
@@ -254,6 +360,8 @@ public final class DriveCloudStore implements CloudStore {
 		private final Path zip;
 		private final long size;
 		private final LongConsumer bytesSent;
+		/** Drive's answer once a status check finds the upload already complete. */
+		private JsonObject finished;
 
 		ResumableUpload(URI session, Path zip, long size, LongConsumer bytesSent) {
 			this.session = session;
@@ -262,7 +370,8 @@ public final class DriveCloudStore implements CloudStore {
 			this.bytesSent = bytesSent;
 		}
 
-		void run() throws IOException {
+		/** Sends the whole zip; returns Drive's JSON for the stored file. */
+		JsonObject run() throws IOException {
 			long offset = 0;
 			int failures = 0;
 			try (var channel = Files.newByteChannel(zip)) {
@@ -270,7 +379,7 @@ public final class DriveCloudStore implements CloudStore {
 					if (size > 0 && offset >= size) {
 						// A status check found everything already stored.
 						bytesSent.accept(size);
-						return;
+						return finished;
 					}
 					int length = (int) Math.min(CHUNK, size - offset);
 					byte[] chunk = new byte[length];
@@ -292,7 +401,7 @@ public final class DriveCloudStore implements CloudStore {
 					int status = response.statusCode();
 					if (status == 200 || status == 201) {
 						bytesSent.accept(size);
-						return;
+						return json(response);
 					}
 					if (status == 308) {
 						offset = rangeEnd(response);
@@ -328,7 +437,10 @@ public final class DriveCloudStore implements CloudStore {
 		private long committedOffset() throws IOException {
 			HttpResponse<byte[]> response = put("bytes */" + size, new byte[0]);
 			if (response.statusCode() == 308) return rangeEnd(response);
-			if (response.statusCode() == 200 || response.statusCode() == 201) return size;
+			if (response.statusCode() == 200 || response.statusCode() == 201) {
+				finished = json(response);
+				return size;
+			}
 			throw new IOException("Couldn't resume the upload: " + describe(response));
 		}
 
@@ -363,7 +475,7 @@ public final class DriveCloudStore implements CloudStore {
 		String pageToken = null;
 		do {
 			String url = API + "/files?spaces=drive&pageSize=1000&orderBy=createdTime"
-					+ "&fields=" + enc("nextPageToken,files(id,name,createdTime)")
+					+ "&fields=" + enc("nextPageToken,files(id,name,createdTime,appProperties)")
 					+ "&q=" + enc(query)
 					+ (pageToken == null ? "" : "&pageToken=" + enc(pageToken));
 			JsonObject page = json(send(token -> HttpRequest.newBuilder(URI.create(url))

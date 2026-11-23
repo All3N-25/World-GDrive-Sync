@@ -1,5 +1,7 @@
 package net.aii3n.worldgdrivesync.session;
 
+import net.aii3n.worldgdrivesync.settings.Settings;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -8,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 /**
@@ -20,11 +23,13 @@ import java.util.stream.Stream;
  */
 public final class SessionCoordinator {
 	private static final String STAGING_PREFIX = ".wgds-";
+	private static final System.Logger LOGGER = System.getLogger(SessionCoordinator.class.getName());
 
 	private final CloudStore cloud;
 	private final InstantSource clock;
 	private final Path localCopies;
 	private final Player me;
+	private final Supplier<Settings> settings;
 
 	/**
 	 * @param cloud       where Shared Worlds are stored
@@ -34,10 +39,19 @@ public final class SessionCoordinator {
 	 * @param me          the player on this computer, who becomes Host when they press Play
 	 */
 	public SessionCoordinator(CloudStore cloud, InstantSource clock, Path localCopies, Player me) {
+		this(cloud, clock, localCopies, me, () -> Settings.DEFAULTS);
+	}
+
+	/**
+	 * @param settings the player's current settings, read each time one is needed, so changes apply
+	 *                 without rebuilding the coordinator
+	 */
+	public SessionCoordinator(CloudStore cloud, InstantSource clock, Path localCopies, Player me, Supplier<Settings> settings) {
 		this.cloud = cloud;
 		this.clock = clock;
 		this.localCopies = localCopies;
 		this.me = me;
+		this.settings = settings;
 	}
 
 	/**
@@ -164,7 +178,8 @@ public final class SessionCoordinator {
 
 	/**
 	 * The one upload path, shared by every kind of upload: makes {@code worldFolder} the Current Save
-	 * at the next Revision, and records that Revision in the Local Copy.
+	 * at the next Revision, and records that Revision in the Local Copy. The previous Current Save
+	 * becomes a Backup, and the oldest Backups are deleted beyond the configured count.
 	 *
 	 * @param worldFolder the world to upload, already saved to disk and not being written to: the
 	 *                    Local Copy itself after the world has closed, or a snapshot of it
@@ -179,13 +194,39 @@ public final class SessionCoordinator {
 			WorldMetadata previous = cloud.readMetadata(worldId)
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
 
-			cloud.uploadCurrentSave(worldId, zip, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+			cloud.replaceCurrentSave(worldId, zip, BackupLabel.of(previous),
+					sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
 			cloud.writeMetadata(worldId, next);
 			new LocalCopyRecord(next.revision()).write(localCopies.resolve(worldId));
+			pruneBackups(worldId);
 			return next;
 		} finally {
 			Files.deleteIfExists(zip);
+		}
+	}
+
+	/** A Shared World's Backups, newest first. */
+	public List<Backup> backups(String worldId) throws IOException {
+		List<Backup> backups = new ArrayList<>(cloud.listBackups(worldId));
+		backups.sort(Comparator.comparing(Backup::savedAt).reversed());
+		return backups;
+	}
+
+	/**
+	 * Deletes the oldest Backups until only the configured count remain. Best effort: the new
+	 * Current Save is already in place, so a failure here only leaves extra Backups, which the next
+	 * upload prunes.
+	 */
+	private void pruneBackups(String worldId) {
+		try {
+			List<Backup> newestFirst = backups(worldId);
+			int keep = settings.get().backupCount();
+			for (Backup old : newestFirst.subList(Math.min(keep, newestFirst.size()), newestFirst.size())) {
+				cloud.deleteBackup(worldId, old.id());
+			}
+		} catch (IOException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete old Backups of " + worldId + "; will retry after the next upload", e);
 		}
 	}
 

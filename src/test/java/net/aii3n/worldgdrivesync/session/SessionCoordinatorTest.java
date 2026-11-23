@@ -1,5 +1,6 @@
 package net.aii3n.worldgdrivesync.session;
 
+import net.aii3n.worldgdrivesync.settings.Settings;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -312,6 +313,87 @@ class SessionCoordinatorTest {
 
 		assertFalse(cloud.currentSaveEntries(shared.id()).containsKey("session.lock"));
 		assertFalse(Files.exists(coordinator().localCopy(shared.id()).orElseThrow().folder().resolve("session.lock")));
+	}
+
+	// --- Backups ---
+
+	@Test
+	void anUploadKeepsThePreviousCurrentSaveAsATimestampedBackup(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+
+		hostASession(coordinator(), shared.id(), "chunks with Alice's house");
+
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		List<Backup> backups = bob.backups(shared.id());
+		assertEquals(1, backups.size());
+		Backup backup = backups.getFirst();
+		assertEquals(1, backup.revision());
+		assertEquals(SHARED_AT, backup.savedAt());
+		assertEquals(Optional.empty(), backup.unmerged());
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks"), cloud.backupEntries(shared.id(), backup.id()));
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks with Alice's house"), cloud.currentSaveEntries(shared.id()));
+		assertEquals(2, bob.listSharedWorlds().getFirst().revision());
+	}
+
+	@Test
+	void onceThereAreMoreThanTheConfiguredCountTheOldestBackupsAreDeleted(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS.withBackupCount(3));
+
+		for (int session = 1; session <= 5; session++) hostASession(alice, shared.id(), "chunks after session " + session);
+
+		List<Backup> backups = friend(bobsSharedsaves).backups(shared.id());
+		assertEquals(List.of(5, 4, 3), backups.stream().map(Backup::revision).toList());
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks after session 2"),
+				cloud.backupEntries(shared.id(), backups.getLast().id()));
+		assertEquals(6, cloud.metadata(shared.id()).revision());
+	}
+
+	@Test
+	void tenBackupsAreKeptByDefault(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+
+		for (int session = 1; session <= 12; session++) hostASession(coordinator(), shared.id(), "chunks after session " + session);
+
+		List<Backup> backups = friend(bobsSharedsaves).backups(shared.id());
+		assertEquals(10, backups.size());
+		assertEquals(12, backups.getFirst().revision());
+		assertEquals(3, backups.getLast().revision());
+	}
+
+	@Test
+	void aFailedUploadMakesNoBackupAndLeavesTheCurrentSave() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		cloud.failUploads();
+
+		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
+
+		assertEquals(List.of(), coordinator().backups(shared.id()));
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks"), cloud.currentSaveEntries(shared.id()));
+	}
+
+	@Test
+	void anUploadStillSucceedsWhenOldBackupsCannotBeDeleted(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS.withBackupCount(1));
+		hostASession(alice, shared.id(), "chunks after session 1");
+		cloud.failBackupDeletes();
+
+		hostASession(alice, shared.id(), "chunks after session 2");
+
+		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();
+		assertEquals(3, seenByBob.revision());
+		assertEquals(WorldStatus.FREE, seenByBob.status());
+		assertEquals(List.of(2, 1), friend(bobsSharedsaves).backups(shared.id()).stream().map(Backup::revision).toList());
+	}
+
+	/** Plays a whole session as {@code player}: Play, change the world, an hour later save and quit. */
+	private void hostASession(SessionCoordinator player, String worldId, String chunks) throws IOException {
+		LocalCopy local = ((PlayResult.Ready) player.play(worldId, ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), chunks);
+		clock.advance(Duration.ofHours(1));
+		player.quit(worldId, ProgressListener.NONE);
 	}
 
 	private Path singleplayerWorld(String folder) throws IOException {
