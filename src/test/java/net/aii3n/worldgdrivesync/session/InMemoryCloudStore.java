@@ -26,11 +26,13 @@ final class InMemoryCloudStore implements CloudStore {
 	private final Map<String, Folder> worlds = new LinkedHashMap<>();
 	private int nextId = 1;
 	private boolean failUploads;
+	private boolean failDownloads;
 
 	private static final class Folder {
 		final String name;
 		WorldMetadata metadata;
 		byte[] currentSave;
+		final Map<String, Lock> locks = new LinkedHashMap<>();
 
 		Folder(String name) {
 			this.name = name;
@@ -75,11 +77,43 @@ final class InMemoryCloudStore implements CloudStore {
 		folder.currentSave = bytes;
 	}
 
+	@Override
+	public synchronized void downloadCurrentSave(String worldId, Path zip, BytesProgress progress) throws IOException {
+		byte[] bytes = folder(worldId).currentSave;
+		if (bytes == null) throw new IOException("No Current Save in " + worldId);
+		for (int received = 0; received < bytes.length; ) {
+			received = Math.min(bytes.length, received + CHUNK);
+			if (failDownloads) throw new IOException("Network down (simulated)");
+			progress.onProgress(received, bytes.length);
+		}
+		Files.write(zip, bytes);
+	}
+
+	@Override
+	public synchronized List<Lock> readLocks(String worldId) throws IOException {
+		return List.copyOf(folder(worldId).locks.values());
+	}
+
+	@Override
+	public synchronized void writeLock(String worldId, Lock lock) throws IOException {
+		folder(worldId).locks.put(lock.hostId(), lock);
+	}
+
+	@Override
+	public synchronized void deleteLock(String worldId, String hostId) throws IOException {
+		folder(worldId).locks.remove(hostId);
+	}
+
 	// --- Test controls and inspection ---
 
 	/** From now on every upload fails partway, like a dropped connection. */
 	void failUploads() {
 		failUploads = true;
+	}
+
+	/** From now on every download fails partway, like a dropped connection. */
+	void failDownloads() {
+		failDownloads = true;
 	}
 
 	synchronized int worldCount() {

@@ -31,4 +31,29 @@ public interface CloudStore {
 	 * @param bytesSent told how many bytes of the zip have been sent so far
 	 */
 	void uploadCurrentSave(String worldId, Path zip, LongConsumer bytesSent) throws IOException;
+
+	/**
+	 * Saves the world's Current Save zip to {@code zip}, replacing that file.
+	 *
+	 * @param progress told how many bytes have arrived so far, out of how many
+	 */
+	void downloadCurrentSave(String worldId, Path zip, BytesProgress progress) throws IOException;
+
+	/** How far a transfer has got, in bytes. */
+	@FunctionalInterface
+	interface BytesProgress {
+		void onProgress(long done, long total);
+	}
+
+	/**
+	 * Every Lock in the world's folder. Normally none or one; briefly more when two players press
+	 * Play together (the coordinator settles that).
+	 */
+	List<Lock> readLocks(String worldId) throws IOException;
+
+	/** Creates or replaces the Lock of {@code lock.hostId()}, leaving other players' Locks alone. */
+	void writeLock(String worldId, Lock lock) throws IOException;
+
+	/** Deletes the Lock of {@code hostId}, if there is one. */
+	void deleteLock(String worldId, String hostId) throws IOException;
 }

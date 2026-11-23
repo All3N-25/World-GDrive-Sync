@@ -8,6 +8,7 @@ import net.aii3n.worldgdrivesync.google.GoogleAccount;
 import net.aii3n.worldgdrivesync.google.GoogleAuthException;
 import net.aii3n.worldgdrivesync.session.CloudStore;
 import net.aii3n.worldgdrivesync.session.CloudWorld;
+import net.aii3n.worldgdrivesync.session.Lock;
 import net.aii3n.worldgdrivesync.session.WorldMetadata;
 
 import java.io.ByteArrayOutputStream;
@@ -41,6 +42,7 @@ import java.util.function.LongConsumer;
  *   &lt;world name&gt;/              folder        t=world   (its Drive id is the world id)
  *     current.zip               Current Save  t=current
  *     metadata.json             {"revision":1,"savedAt":"..."}  t=meta
+ *     lock-&lt;host id&gt;.json       one per Lock  t=lock, h=&lt;host id&gt;
  * </pre>
  */
 public final class DriveCloudStore implements CloudStore {
@@ -105,7 +107,7 @@ public final class DriveCloudStore implements CloudStore {
 					.header("Content-Type", "application/json")
 					.method("PATCH", HttpRequest.BodyPublishers.ofByteArray(content)));
 		} else {
-			createSmallFile("metadata.json", worldId, "meta", "application/json", content);
+			createSmallFile("metadata.json", worldId, tag("meta"), "application/json", content);
 		}
 	}
 
@@ -135,6 +137,115 @@ public final class DriveCloudStore implements CloudStore {
 		URI session = started.headers().firstValue("Location").map(URI::create)
 				.orElseThrow(() -> new IOException("Drive didn't start the upload"));
 		new ResumableUpload(session, zip, size, bytesSent).run();
+	}
+
+	@Override
+	public void downloadCurrentSave(String worldId, Path zip, BytesProgress progress) throws IOException {
+		String fileId = child(worldId, "current").orElseThrow(() -> new IOException("World " + worldId + " has no Current Save"));
+		JsonObject info = json(send(token -> HttpRequest.newBuilder(URI.create(API + "/files/" + fileId + "?fields=size"))
+				.header("Authorization", "Bearer " + token).GET()));
+		long size = Long.parseLong(string(info, "size"));
+		for (int attempt = 1; ; attempt++) {
+			try {
+				streamTo(fileId, zip, size, progress);
+				return;
+			} catch (IOException e) {
+				if (attempt >= ATTEMPTS) throw e;
+				backOff(attempt);
+			}
+		}
+	}
+
+	/** Streams a large file to disk, reporting bytes as they arrive. One renewal on a 401. */
+	private void streamTo(String fileId, Path target, long size, BytesProgress progress) throws IOException {
+		boolean renewed = false;
+		while (true) {
+			String token = accessToken();
+			HttpRequest request = HttpRequest.newBuilder(URI.create(API + "/files/" + fileId + "?alt=media"))
+					.header("Authorization", "Bearer " + token)
+					.timeout(Duration.ofMinutes(5))
+					.GET().build();
+			HttpResponse<java.io.InputStream> response;
+			try {
+				response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new IOException("Download interrupted", e);
+			}
+			try (java.io.InputStream in = response.body()) {
+				int status = response.statusCode();
+				if (status == 401 && !renewed) {
+					account.accessTokenRejected(token);
+					renewed = true;
+					continue;
+				}
+				if (status / 100 != 2) throw new IOException("Google Drive refused the download: HTTP " + status);
+				try (var out = Files.newOutputStream(target)) {
+					byte[] buffer = new byte[64 * 1024];
+					long received = 0;
+					progress.onProgress(0, size);
+					for (int n; (n = in.read(buffer)) >= 0; ) {
+						out.write(buffer, 0, n);
+						received += n;
+						progress.onProgress(received, size);
+					}
+					if (received != size) throw new IOException("Download ended early (" + received + " of " + size + " bytes)");
+				}
+				return;
+			}
+		}
+	}
+
+	@Override
+	public List<Lock> readLocks(String worldId) throws IOException {
+		List<Lock> locks = new ArrayList<>();
+		for (JsonObject file : search("'" + worldId + "' in parents and " + tagged("lock"))) {
+			String body = new String(download(string(file, "id")), StandardCharsets.UTF_8);
+			try {
+				JsonObject json = JsonParser.parseString(body).getAsJsonObject();
+				locks.add(new Lock(json.get("hostId").getAsString(), json.get("hostName").getAsString(),
+						Instant.parse(json.get("startedAt").getAsString()), Instant.parse(json.get("lastHeartbeat").getAsString())));
+			} catch (RuntimeException e) {
+				throw new IOException("Unreadable Lock in world " + worldId, e);
+			}
+		}
+		return locks;
+	}
+
+	@Override
+	public void writeLock(String worldId, Lock lock) throws IOException {
+		JsonObject json = new JsonObject();
+		json.addProperty("hostId", lock.hostId());
+		json.addProperty("hostName", lock.hostName());
+		json.addProperty("startedAt", lock.startedAt().toString());
+		json.addProperty("lastHeartbeat", lock.lastHeartbeat().toString());
+		byte[] content = json.toString().getBytes(StandardCharsets.UTF_8);
+
+		Optional<String> existing = lockFile(worldId, lock.hostId());
+		if (existing.isPresent()) {
+			send(token -> HttpRequest.newBuilder(URI.create(UPLOAD_API + "/files/" + existing.get() + "?uploadType=media&fields=id"))
+					.header("Authorization", "Bearer " + token)
+					.header("Content-Type", "application/json")
+					.method("PATCH", HttpRequest.BodyPublishers.ofByteArray(content)));
+		} else {
+			JsonObject properties = tag("lock");
+			properties.addProperty("h", lock.hostId());
+			createSmallFile("lock-" + lock.hostId() + ".json", worldId, properties, "application/json", content);
+		}
+	}
+
+	@Override
+	public void deleteLock(String worldId, String hostId) throws IOException {
+		Optional<String> file = lockFile(worldId, hostId);
+		if (file.isEmpty()) return;
+		send(token -> HttpRequest.newBuilder(URI.create(API + "/files/" + file.get()))
+				.header("Authorization", "Bearer " + token).DELETE());
+	}
+
+	private Optional<String> lockFile(String worldId, String hostId) throws IOException {
+		List<JsonObject> found = search("'" + worldId + "' in parents and " + tagged("lock")
+				+ " and appProperties has { key='h' and value='" + hostId.replace("\\", "\\\\").replace("'", "\\'") + "' }");
+		return found.isEmpty() ? Optional.empty() : Optional.of(string(found.getFirst(), "id"));
 	}
 
 	/** Sends a zip in chunks to a resumable-upload session, picking up where Drive left off after a failure. */
@@ -276,11 +387,11 @@ public final class DriveCloudStore implements CloudStore {
 				.POST(HttpRequest.BodyPublishers.ofString(metadata.toString()))));
 	}
 
-	private void createSmallFile(String name, String parentId, String type, String contentType, byte[] content) throws IOException {
+	private void createSmallFile(String name, String parentId, JsonObject appProperties, String contentType, byte[] content) throws IOException {
 		JsonObject metadata = new JsonObject();
 		metadata.addProperty("name", name);
 		metadata.add("parents", single(parentId));
-		metadata.add("appProperties", tag(type));
+		metadata.add("appProperties", appProperties);
 		String boundary = "wgds-" + UUID.randomUUID();
 		ByteArrayOutputStream body = new ByteArrayOutputStream();
 		body.writeBytes(("--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"

@@ -18,11 +18,14 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SessionCoordinatorTest {
 	private static final Instant SHARED_AT = Instant.parse("2026-11-24T18:00:00Z");
+	private static final Player ALICE = new Player("uuid-alice", "Alice");
+	private static final Player BOB = new Player("uuid-bob", "Bob");
 
 	@TempDir
 	Path saves;
@@ -39,7 +42,159 @@ class SessionCoordinatorTest {
 	}
 
 	private SessionCoordinator coordinator() {
-		return new SessionCoordinator(cloud, clock, sharedsaves);
+		return new SessionCoordinator(cloud, clock, sharedsaves, ALICE);
+	}
+
+	/** Another player on another computer, sharing the same cloud account. */
+	private SessionCoordinator friend(Path theirSharedsaves) {
+		return new SessionCoordinator(cloud, clock, theirSharedsaves, BOB);
+	}
+
+	// --- Play and quit ---
+
+	@Test
+	void playOnAFreeSharedWorldTakesTheLockSoFriendsSeeItHosted(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+
+		PlayResult result = coordinator().play(shared.id(), ProgressListener.NONE);
+
+		assertTrue(result instanceof PlayResult.Ready);
+		WorldStatus seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst().status();
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT.plus(Duration.ofMinutes(10))), seenByBob);
+	}
+
+	@Test
+	void playIsRefusedNamingTheHostWhileSomeoneElseHoldsTheLock(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		clock.advance(Duration.ofMinutes(1));
+
+		PlayResult result = bob.play(shared.id(), ProgressListener.NONE);
+
+		PlayResult.Refused refused = assertInstanceOf(PlayResult.Refused.class, result);
+		assertEquals("Alice", refused.heldBy().hostName());
+		// Bob got nothing and took nothing: Alice is still the Host.
+		assertEquals(Optional.empty(), bob.localCopy(shared.id()));
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void playWithoutALocalCopyDownloadsTheCurrentSaveWithProgress(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		List<long[]> downloading = new ArrayList<>();
+
+		PlayResult result = bob.play(shared.id(), (step, done, total) -> {
+			if (step == ProgressListener.Step.DOWNLOADING) downloading.add(new long[]{done, total});
+		});
+
+		LocalCopy local = assertInstanceOf(PlayResult.Ready.class, result).localCopy();
+		assertEquals(bob.localCopy(shared.id()), Optional.of(local));
+		assertEquals(1, local.revision());
+		assertEquals(bobsSharedsaves, local.folder().getParent());
+		assertEquals("level data", Files.readString(local.folder().resolve("level.dat")));
+		assertEquals("chunks", Files.readString(local.folder().resolve("region/r.0.0.mca")));
+		assertTrue(downloading.size() > 1, "progress reported more than once");
+		assertEquals(downloading.getLast()[1], downloading.getLast()[0], "last report covers the whole zip");
+	}
+
+	@Test
+	void quittingUploadsTheWorldAsTheNextRevisionThenReleasesTheLock(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		write(local.folder().resolve("session.lock"), "☃");
+		clock.advance(Duration.ofHours(2));
+		List<long[]> uploading = new ArrayList<>();
+
+		coordinator().quit(shared.id(), (step, done, total) -> {
+			if (step == ProgressListener.Step.UPLOADING) uploading.add(new long[]{done, total});
+		});
+
+		assertEquals(Map.of(
+				"level.dat", "level data",
+				"region/r.0.0.mca", "chunks with Alice's house"), cloud.currentSaveEntries(shared.id()));
+		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();
+		assertEquals(2, seenByBob.revision());
+		assertEquals(SHARED_AT.plus(Duration.ofHours(2)), seenByBob.savedAt());
+		assertEquals(WorldStatus.FREE, seenByBob.status());
+		assertEquals(2, coordinator().localCopy(shared.id()).orElseThrow().revision());
+		assertEquals(uploading.getLast()[1], uploading.getLast()[0], "upload progress reaches the whole zip");
+	}
+
+	@Test
+	void aFailedFinalUploadKeepsTheLockAndTheRevision(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		cloud.failUploads();
+
+		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
+
+		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), seenByBob.status());
+		assertEquals(1, seenByBob.revision());
+		assertEquals(1, coordinator().localCopy(shared.id()).orElseThrow().revision());
+	}
+
+	@Test
+	void aFailedDownloadReleasesTheLockAgain(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		cloud.failDownloads();
+		SessionCoordinator bob = friend(bobsSharedsaves);
+
+		assertThrows(IOException.class, () -> bob.play(shared.id(), ProgressListener.NONE));
+
+		assertEquals(WorldStatus.FREE, bob.listSharedWorlds().getFirst().status());
+		assertEquals(Optional.empty(), bob.localCopy(shared.id()));
+	}
+
+	@Test
+	void backingOutBeforeTheWorldOpensReleasesTheLock(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+
+		coordinator().leaveWithoutPlaying(shared.id());
+
+		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();
+		assertEquals(WorldStatus.FREE, seenByBob.status());
+		assertEquals(1, seenByBob.revision());
+	}
+
+	@Test
+	void anOlderLocalCopyIsReplacedByTheNewerRevisionOnPlay(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		LocalCopy bobsCopy = ((PlayResult.Ready) bob.play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(bobsCopy.folder().resolve("region/r.0.0.mca"), "chunks with Bob's farm");
+		bob.quit(shared.id(), ProgressListener.NONE);
+		// Alice still has Revision 1; Bob's session made Revision 2.
+		LocalCopy alicesCopy = coordinator().localCopy(shared.id()).orElseThrow();
+		assertEquals(1, alicesCopy.revision());
+
+		PlayResult result = coordinator().play(shared.id(), ProgressListener.NONE);
+
+		LocalCopy updated = assertInstanceOf(PlayResult.Ready.class, result).localCopy();
+		assertEquals(2, updated.revision());
+		assertEquals(alicesCopy.folder(), updated.folder());
+		assertEquals("chunks with Bob's farm", Files.readString(updated.folder().resolve("region/r.0.0.mca")));
+		assertEquals(Optional.of(updated), coordinator().localCopy(shared.id()));
+	}
+
+	@Test
+	void aLocalCopyAtTheCurrentRevisionOpensWithoutDownloading() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy before = coordinator().localCopy(shared.id()).orElseThrow();
+		// Only on this computer: a download would wipe it.
+		write(before.folder().resolve("options-only-here.txt"), "local");
+		List<ProgressListener.Step> steps = new ArrayList<>();
+
+		PlayResult result = coordinator().play(shared.id(), (step, done, total) -> steps.add(step));
+
+		assertEquals(new PlayResult.Ready(before), result);
+		assertEquals(List.of(), steps);
+		assertEquals("local", Files.readString(before.folder().resolve("options-only-here.txt")));
 	}
 
 	@Test
@@ -72,7 +227,7 @@ class SessionCoordinatorTest {
 	@Test
 	void aSharedWorldsLocalCopyIsAWorldFolderDirectlyInSharedsavesThatTheGameCanOpen(@TempDir Path friendsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
-		SessionCoordinator friend = new SessionCoordinator(cloud, clock, friendsSharedsaves);
+		SessionCoordinator friend = friend(friendsSharedsaves);
 		SharedWorld listed = friend.listSharedWorlds().getFirst();
 
 		// The game opens <sharedsaves>/<folder name>, so the Local Copy must sit directly in sharedsaves/.
@@ -98,7 +253,7 @@ class SessionCoordinatorTest {
 	@Test
 	void everySharedWorldOnTheAccountIsListedAsFree(@TempDir Path friendsSharedsaves) throws Exception {
 		SessionCoordinator me = coordinator();
-		SessionCoordinator friend = new SessionCoordinator(cloud, clock, friendsSharedsaves);
+		SessionCoordinator friend = friend(friendsSharedsaves);
 		SharedWorld survival = me.share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		clock.advance(Duration.ofHours(1));
 		SharedWorld creative = me.share(singleplayerWorld("Creative"), "Creative", ProgressListener.NONE);
@@ -113,7 +268,7 @@ class SessionCoordinatorTest {
 
 	@Test
 	void listingReReadsTheCloudEachTime(@TempDir Path friendsSharedsaves) throws Exception {
-		SessionCoordinator friend = new SessionCoordinator(cloud, clock, friendsSharedsaves);
+		SessionCoordinator friend = friend(friendsSharedsaves);
 		assertEquals(List.of(), friend.listSharedWorlds());
 
 		coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);

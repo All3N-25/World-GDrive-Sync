@@ -23,6 +23,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.CommonColors;
 import org.jspecify.annotations.Nullable;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -193,7 +195,18 @@ public class SharedWorldsScreen extends Screen {
 	static Component statusText(WorldStatus status) {
 		return switch (status) {
 			case WorldStatus.Free free -> Component.translatable("world-gdrive-sync.status.free").withStyle(ChatFormatting.GREEN);
+			case WorldStatus.Hosted hosted -> Component.translatable("world-gdrive-sync.status.hosted",
+					hosted.host(), duration(Duration.between(hosted.since(), Instant.now()))).withStyle(ChatFormatting.GOLD);
 		};
+	}
+
+	/** "45s", "12m", "2h 5m". */
+	static String duration(Duration duration) {
+		long seconds = Math.max(0, duration.toSeconds());
+		if (seconds < 60) return seconds + "s";
+		long minutes = seconds / 60;
+		if (minutes < 60) return minutes + "m";
+		return minutes / 60 + "h " + minutes % 60 + "m";
 	}
 
 	private static final class WorldList extends ObjectSelectionList<WorldList.Entry> {

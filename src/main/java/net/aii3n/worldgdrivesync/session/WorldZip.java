@@ -1,13 +1,16 @@
 package net.aii3n.worldgdrivesync.session;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 /** Packs a world folder into a zip whose entries are relative to the world folder. */
@@ -48,6 +51,28 @@ final class WorldZip {
 				Files.copy(file, zip);
 				zip.closeEntry();
 				progress.onProgress(ProgressListener.Step.ZIPPING, ++done, files.size());
+			}
+		}
+	}
+
+	/** Unpacks a zip made by {@link #zip} into {@code worldFolder}, which must be empty or not exist yet. */
+	static void unzip(Path zipFile, Path worldFolder, ProgressListener progress) throws IOException {
+		Path root = worldFolder.toAbsolutePath().normalize();
+		try (ZipFile zip = new ZipFile(zipFile.toFile())) {
+			int total = zip.size();
+			int done = 0;
+			for (ZipEntry entry : Collections.list(zip.entries())) {
+				Path target = root.resolve(entry.getName()).normalize();
+				if (!target.startsWith(root) || target.equals(root)) throw new IOException("Bad entry in world zip: " + entry.getName());
+				if (entry.isDirectory()) {
+					Files.createDirectories(target);
+				} else {
+					Files.createDirectories(target.getParent());
+					try (InputStream in = zip.getInputStream(entry)) {
+						Files.copy(in, target);
+					}
+				}
+				progress.onProgress(ProgressListener.Step.UNZIPPING, ++done, total);
 			}
 		}
 	}

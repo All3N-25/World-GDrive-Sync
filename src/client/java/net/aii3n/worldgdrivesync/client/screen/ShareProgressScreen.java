@@ -92,6 +92,9 @@ public class ShareProgressScreen extends Screen implements ProgressListener {
 			case ZIPPING -> Component.translatable("world-gdrive-sync.share.zipping");
 			case UPLOADING -> Component.translatable("world-gdrive-sync.share.uploading",
 					megabytes(done), megabytes(total));
+			case DOWNLOADING -> Component.translatable("world-gdrive-sync.progress.downloading",
+					megabytes(done), megabytes(total));
+			case UNZIPPING -> Component.translatable("world-gdrive-sync.progress.unzipping");
 		};
 		graphics.centeredText(font, label, width / 2, height / 2 - 20, CommonColors.LIGHT_GRAY);
 

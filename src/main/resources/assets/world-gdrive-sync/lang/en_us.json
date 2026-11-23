@@ -13,6 +13,7 @@
 	"world-gdrive-sync.play.noLocalCopy.title": "Not on This Computer",
 	"world-gdrive-sync.play.noLocalCopy": "%s has no Local Copy on this computer yet. Downloading Shared Worlds isn't supported yet.",
 	"world-gdrive-sync.status.free": "Free",
+	"world-gdrive-sync.status.hosted": "Hosted by %s (for %s)",
 	"world-gdrive-sync.share.title": "Share an Existing World",
 	"world-gdrive-sync.share.explain": "The world is uploaded as a new Shared World. Your original stays in your Singleplayer list.",
 	"world-gdrive-sync.share.confirm": "Share",
