@@ -15,6 +15,9 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
+
+import net.aii3n.worldgdrivesync.settings.Settings;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -298,6 +301,74 @@ class SessionCoordinatorTest {
 		assertEquals(new PlayResult.Ready(before), result);
 		assertEquals(List.of(), steps);
 		assertEquals("local", Files.readString(before.folder().resolve("options-only-here.txt")));
+	}
+
+	// --- Periodic upload ---
+
+	@Test
+	void aPeriodicUploadFallsDueAfterTheIntervalAndBumpsTheRevisionWhileTheHostKeepsTheLock(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+
+		clock.advance(Duration.ofMinutes(29));
+		assertFalse(coordinator().periodicUploadDue(shared.id()), "not before the default 30 minutes");
+		clock.advance(Duration.ofMinutes(1));
+		assertTrue(coordinator().periodicUploadDue(shared.id()));
+
+		coordinator().periodicUpload(shared.id(), snapshot -> WorldZip.copy(local.folder(), snapshot), ProgressListener.NONE);
+
+		assertEquals("chunks with Alice's house", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();
+		assertEquals(2, seenByBob.revision());
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), seenByBob.status());
+		assertEquals(2, coordinator().localCopy(shared.id()).orElseThrow().revision());
+		assertFalse(coordinator().periodicUploadDue(shared.id()), "the interval starts again");
+		clock.advance(Duration.ofMinutes(30));
+		assertTrue(coordinator().periodicUploadDue(shared.id()));
+	}
+
+	@Test
+	void withPeriodicUploadDisabledNoneFallsDueButQuittingStillUploads(@TempDir Path bobsSharedsaves) throws Exception {
+		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE,
+				() -> Settings.DEFAULTS.withPeriodicUploadInterval(Duration.ZERO));
+		SharedWorld shared = alice.share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		alice.play(shared.id(), ProgressListener.NONE);
+
+		clock.advance(Duration.ofHours(5));
+		assertFalse(alice.periodicUploadDue(shared.id()));
+
+		alice.quit(shared.id(), ProgressListener.NONE);
+		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();
+		assertEquals(2, seenByBob.revision());
+		assertEquals(WorldStatus.FREE, seenByBob.status());
+	}
+
+	@Test
+	void theIntervalFollowsTheCurrentSetting() throws Exception {
+		AtomicReference<Settings> settings = new AtomicReference<>(Settings.DEFAULTS);
+		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE, settings::get);
+		SharedWorld shared = alice.share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		alice.play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		assertFalse(alice.periodicUploadDue(shared.id()));
+
+		settings.set(Settings.DEFAULTS.withPeriodicUploadInterval(Duration.ofMinutes(10)));
+
+		assertTrue(alice.periodicUploadDue(shared.id()));
+	}
+
+	@Test
+	void noPeriodicUploadIsDueForAPlayerWhoIsNotHosting(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		clock.advance(Duration.ofHours(1));
+		assertFalse(bob.periodicUploadDue(shared.id()), "nobody is hosting");
+
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofHours(1));
+
+		assertFalse(bob.periodicUploadDue(shared.id()), "Alice is hosting, not Bob");
 	}
 
 	@Test
