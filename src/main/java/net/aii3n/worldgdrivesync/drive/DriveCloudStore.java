@@ -2,6 +2,7 @@ package net.aii3n.worldgdrivesync.drive;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.aii3n.worldgdrivesync.google.GoogleAccount;
@@ -183,6 +184,48 @@ public final class DriveCloudStore implements CloudStore {
 			}
 		}
 		return backups;
+	}
+
+	/**
+	 * Two PATCHes, no re-upload: the old {@code current.zip} moves into {@code backups/} (renamed,
+	 * re-tagged {@code t=backup} with its label), then the chosen Backup moves into the world folder
+	 * as {@code current.zip} ({@code t=current}). If the second PATCH fails, the first is undone
+	 * (best effort), so the world keeps a Current Save.
+	 */
+	@Override
+	public Backup restoreBackup(String worldId, String backupId, BackupLabel previous) throws IOException {
+		String oldId = child(worldId, "current").orElseThrow(() -> new IOException("World " + worldId + " has no Current Save to replace"));
+		String backupsId = backupsFolder(worldId);
+
+		JsonObject backup = new JsonObject();
+		backup.addProperty("name", "backup-r" + previous.revision() + "-" + previous.savedAt().toString().replace(':', '-') + ".zip");
+		backup.add("appProperties", backupProperties(previous));
+		patch(API + "/files/" + oldId + "?addParents=" + enc(backupsId) + "&removeParents=" + enc(worldId) + "&fields=id", backup);
+
+		JsonObject current = new JsonObject();
+		current.addProperty("name", "current.zip");
+		current.add("appProperties", currentProperties());
+		try {
+			patch(API + "/files/" + backupId + "?addParents=" + enc(worldId) + "&removeParents=" + enc(backupsId) + "&fields=id", current);
+		} catch (IOException | RuntimeException e) {
+			try {
+				patch(API + "/files/" + oldId + "?addParents=" + enc(worldId) + "&removeParents=" + enc(backupsId) + "&fields=id", current);
+			} catch (IOException | RuntimeException undo) {
+				e.addSuppressed(undo);
+			}
+			throw e;
+		}
+		return new Backup(oldId, previous);
+	}
+
+	/**
+	 * The {@code t=current} tag, with the Backup label keys set to null so Drive removes them from a
+	 * file that was a Backup.
+	 */
+	private static JsonObject currentProperties() {
+		JsonObject properties = tag("current");
+		for (String key : List.of("r", "s", "uh", "un", "us")) properties.add(key, JsonNull.INSTANCE);
+		return properties;
 	}
 
 	@Override

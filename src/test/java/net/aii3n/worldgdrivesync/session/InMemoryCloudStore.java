@@ -93,6 +93,18 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	@Override
+	public synchronized Backup restoreBackup(String worldId, String backupId, BackupLabel previous) throws IOException {
+		Folder folder = folder(worldId);
+		if (folder.currentSave == null) throw new IOException("No Current Save in " + worldId + " to replace");
+		StoredBackup chosen = folder.backups.remove(backupId);
+		if (chosen == null) throw new IOException("No such Backup: " + backupId);
+		Backup backup = new Backup("backup-" + nextId++, previous);
+		folder.backups.put(backup.id(), new StoredBackup(backup, folder.currentSave));
+		folder.currentSave = chosen.zip();
+		return backup;
+	}
+
+	@Override
 	public synchronized void deleteBackup(String worldId, String backupId) throws IOException {
 		if (failBackupDeletes) throw new IOException("Network down (simulated)");
 		if (folder(worldId).backups.remove(backupId) == null) throw new IOException("No such Backup: " + backupId);
