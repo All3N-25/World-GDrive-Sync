@@ -2,10 +2,12 @@ package net.aii3n.worldgdrivesync.client.screen;
 
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.client.GoogleConnection;
-import net.aii3n.worldgdrivesync.client.ModSettings;
+import net.aii3n.worldgdrivesync.client.SharedWorlds;
 import net.aii3n.worldgdrivesync.google.SignIn;
+import net.aii3n.worldgdrivesync.settings.Settings;
 import net.aii3n.worldgdrivesync.settings.SettingsFile;
 import net.minecraft.ChatFormatting;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
@@ -15,6 +17,7 @@ import net.minecraft.client.gui.layouts.LinearLayout;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -22,15 +25,19 @@ import java.util.List;
 import java.util.TreeSet;
 
 /**
- * Mod settings. For now: connect the shared Google account through the system browser, see which
- * account is connected, and disconnect it.
+ * Mod settings: connect the shared Google account through the system browser, see which account
+ * is connected, and disconnect it; and the Shared World settings (periodic upload and stale
+ * timeout, saved at once; how many Backups to keep, saved when the screen closes).
  */
 public class SharedWorldsSettingsScreen extends Screen {
 	private static final Component TITLE = Component.translatable("world-gdrive-sync.settings.title");
-	private static final List<Long> STALE_TIMEOUT_CHOICES = List.of(2L, 3L, 5L, 10L, 15L, 30L, 60L);
+	private static final List<Long> PERIODIC_UPLOAD_MINUTES = List.of(0L, 5L, 10L, 15L, 30L, 60L, 120L);
+	private static final List<Long> STALE_TIMEOUT_MINUTES = List.of(2L, 3L, 5L, 10L, 15L, 30L, 60L);
 	private final Screen lastScreen;
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this);
 	private Object shownState;
+	/** The Backup count as set on the slider; kept across rebuilds and saved on close, not on every drag step. */
+	private int backupCount = SharedWorlds.get().settings().current().backupCount();
 
 	public SharedWorldsSettingsScreen(Screen lastScreen) {
 		super(TITLE);
@@ -77,6 +84,8 @@ public class SharedWorldsSettingsScreen extends Screen {
 			}
 		}
 
+		content.addChild(periodicUploadButton());
+		content.addChild(new BackupCountSlider());
 		content.addChild(staleTimeoutButton());
 
 		layout.addToFooter(Button.builder(CommonComponents.GUI_DONE, b -> onClose()).width(200).build());
@@ -84,18 +93,37 @@ public class SharedWorldsSettingsScreen extends Screen {
 		layout.visitWidgets(this::addRenderableWidget);
 	}
 
-	/** How long a Lock may go without a Heartbeat before it shows as Stale. Saved on every change. */
-	private CycleButton<Long> staleTimeoutButton() {
-		SettingsFile file = ModSettings.get();
-		long current = file.settings().staleTimeout().toMinutes();
-		TreeSet<Long> choices = new TreeSet<>(STALE_TIMEOUT_CHOICES);
+	/** Periodic upload interval while hosting, in minutes; 0 turns it off. Saved as soon as it changes. */
+	private CycleButton<Long> periodicUploadButton() {
+		SettingsFile settings = SharedWorlds.get().settings();
+		long current = settings.current().periodicUploadInterval().toMinutes();
+		TreeSet<Long> choices = new TreeSet<>(PERIODIC_UPLOAD_MINUTES);
 		choices.add(current);
-		return CycleButton.builder((Long minutes) -> Component.translatable("world-gdrive-sync.settings.minutes", minutes), current)
+		return CycleButton.<Long>builder(minutes -> minutes == 0 ? CommonComponents.OPTION_OFF
+						: Component.translatable("world-gdrive-sync.settings.periodicUpload.minutes", minutes), current)
+				.withValues(List.copyOf(choices))
+				.withTooltip(minutes -> Tooltip.create(Component.translatable("world-gdrive-sync.settings.periodicUpload.tooltip")))
+				.create(0, 0, 200, 20, Component.translatable("world-gdrive-sync.settings.periodicUpload"), (button, minutes) -> {
+					try {
+						settings.update(settings.current().withPeriodicUploadInterval(Duration.ofMinutes(minutes)));
+					} catch (IOException e) {
+						WorldGDriveSync.LOGGER.warn("Couldn't save settings", e);
+					}
+				});
+	}
+
+	/** How long a Lock may go without a Heartbeat before it shows as Stale. Saved as soon as it changes. */
+	private CycleButton<Long> staleTimeoutButton() {
+		SettingsFile settings = SharedWorlds.get().settings();
+		long current = settings.current().staleTimeout().toMinutes();
+		TreeSet<Long> choices = new TreeSet<>(STALE_TIMEOUT_MINUTES);
+		choices.add(current);
+		return CycleButton.<Long>builder(minutes -> Component.translatable("world-gdrive-sync.settings.staleTimeout.minutes", minutes), current)
 				.withValues(List.copyOf(choices))
 				.withTooltip(minutes -> Tooltip.create(Component.translatable("world-gdrive-sync.settings.staleTimeout.tooltip")))
 				.create(0, 0, 200, 20, Component.translatable("world-gdrive-sync.settings.staleTimeout"), (button, minutes) -> {
 					try {
-						file.save(file.settings().withStaleTimeout(Duration.ofMinutes(minutes)));
+						settings.update(settings.current().withStaleTimeout(Duration.ofMinutes(minutes)));
 					} catch (IOException e) {
 						WorldGDriveSync.LOGGER.warn("Couldn't save settings", e);
 					}
@@ -124,6 +152,38 @@ public class SharedWorldsSettingsScreen extends Screen {
 
 	@Override
 	public void onClose() {
+		SettingsFile settings = SharedWorlds.get().settings();
+		if (backupCount != settings.current().backupCount()) {
+			try {
+				settings.update(settings.current().withBackupCount(backupCount));
+			} catch (IOException e) {
+				WorldGDriveSync.LOGGER.warn("Couldn't save settings", e);
+			}
+		}
 		minecraft.gui.setScreen(lastScreen);
+	}
+
+	/** Backups kept per Shared World, from {@link Settings#MIN_BACKUP_COUNT} to {@link Settings#MAX_BACKUP_COUNT}. */
+	private final class BackupCountSlider extends AbstractSliderButton {
+		private static final int RANGE = Settings.MAX_BACKUP_COUNT - Settings.MIN_BACKUP_COUNT;
+
+		BackupCountSlider() {
+			super(0, 0, 200, DEFAULT_HEIGHT, Component.empty(), (double) (backupCount - Settings.MIN_BACKUP_COUNT) / RANGE);
+			updateMessage();
+		}
+
+		private int count() {
+			return Settings.MIN_BACKUP_COUNT + Mth.floor(value * RANGE + 0.5);
+		}
+
+		@Override
+		protected void updateMessage() {
+			setMessage(Component.translatable("world-gdrive-sync.settings.backupCount", count()));
+		}
+
+		@Override
+		protected void applyValue() {
+			backupCount = count();
+		}
 	}
 }

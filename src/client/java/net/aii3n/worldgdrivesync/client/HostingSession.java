@@ -64,12 +64,6 @@ public final class HostingSession {
 		});
 	}
 
-	/** The id of the Shared World this player is hosting right now, or null. */
-	static @Nullable String hostedWorldId() {
-		Session session = hosting;
-		return session == null ? null : session.worldId();
-	}
-
 	// Server thread.
 	private static void onServerStarted(MinecraftServer server) {
 		Session session = opening;
@@ -94,6 +88,12 @@ public final class HostingSession {
 		if (due == null || minecraft.level != null || minecraft.hasSingleplayerServer()) return;
 		finalUploadDue = null;
 		minecraft.gui.setScreen(new UploadingScreen(due.worldId(), new SharedWorldsScreen(new TitleScreen())));
+	}
+
+	/** The id of the Shared World this player is hosting right now, if any. */
+	public static @Nullable String hostedWorldId() {
+		Session session = hosting;
+		return session == null ? null : session.worldId();
 	}
 
 	private static Path normalize(Path path) {

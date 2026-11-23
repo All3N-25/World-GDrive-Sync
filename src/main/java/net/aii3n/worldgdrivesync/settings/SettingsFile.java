@@ -4,7 +4,6 @@ import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -12,71 +11,74 @@ import java.time.Duration;
 import java.util.Properties;
 
 /**
- * The player's {@link Settings}, kept in a properties file in the mod's config folder. A missing
- * file, or a value that can't be read, means that setting's default.
+ * The player's {@link Settings}, kept in a properties file in the mod's config folder so they
+ * survive restarts. Holds the current settings in memory; {@link #current()} is cheap and safe from
+ * any thread. A missing or unreadable value falls back to its default.
  */
 public final class SettingsFile {
+	private static final String PERIODIC_UPLOAD_MINUTES = "periodicUploadMinutes";
+	private static final String BACKUP_COUNT = "backupCount";
 	private static final String STALE_TIMEOUT_MINUTES = "staleTimeoutMinutes";
 
 	private final Path file;
-	private volatile Settings settings;
+	private volatile Settings current;
 
-	/** Loads the settings from {@code file}, if it exists. */
 	public SettingsFile(Path file) {
 		this.file = file;
-		this.settings = load(file);
+		this.current = read(file);
 	}
 
-	/** The current settings. */
-	public Settings settings() {
-		return settings;
+	public Settings current() {
+		return current;
 	}
 
-	/** Makes {@code settings} current and writes them to the file. */
-	public void save(Settings settings) throws IOException {
-		this.settings = settings;
+	/** Makes {@code settings} current and saves them (atomically, so a crash can't half-write them). */
+	public synchronized void update(Settings settings) throws IOException {
+		current = settings;
 		Properties properties = new Properties();
+		properties.setProperty(PERIODIC_UPLOAD_MINUTES, Long.toString(settings.periodicUploadInterval().toMinutes()));
+		properties.setProperty(BACKUP_COUNT, Integer.toString(settings.backupCount()));
 		properties.setProperty(STALE_TIMEOUT_MINUTES, Long.toString(settings.staleTimeout().toMinutes()));
-
 		Path folder = file.toAbsolutePath().getParent();
 		Files.createDirectories(folder);
 		Path temp = Files.createTempFile(folder, file.getFileName().toString(), ".tmp");
 		try {
 			try (Writer out = Files.newBufferedWriter(temp, StandardCharsets.UTF_8)) {
-				properties.store(out, "World GDrive Sync settings");
+				properties.store(out, "World GDrive Sync settings (periodicUploadMinutes=0 disables periodic upload)");
 			}
-			try {
-				Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-			} catch (AtomicMoveNotSupportedException e) {
-				Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
-			}
+			Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
 		} finally {
 			Files.deleteIfExists(temp);
 		}
 	}
 
-	private static Settings load(Path file) {
+	private static Settings read(Path file) {
+		Settings settings = Settings.DEFAULTS;
+		if (!Files.isRegularFile(file)) return settings;
 		Properties properties = new Properties();
-		if (Files.isRegularFile(file)) {
-			try (Reader in = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-				properties.load(in);
-			} catch (IOException | IllegalArgumentException e) {
-				return Settings.DEFAULTS;
-			}
+		try (Reader in = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+			properties.load(in);
+		} catch (IOException e) {
+			return settings;
 		}
-		Settings defaults = Settings.DEFAULTS;
-		return new Settings(
-				minutes(properties, STALE_TIMEOUT_MINUTES, defaults.staleTimeout()));
-	}
-
-	private static Duration minutes(Properties properties, String key, Duration fallback) {
-		String value = properties.getProperty(key);
-		if (value == null) return fallback;
 		try {
-			long minutes = Long.parseLong(value.trim());
-			return minutes > 0 ? Duration.ofMinutes(minutes) : fallback;
-		} catch (NumberFormatException e) {
-			return fallback;
+			String minutes = properties.getProperty(PERIODIC_UPLOAD_MINUTES);
+			if (minutes != null) settings = settings.withPeriodicUploadInterval(Duration.ofMinutes(Long.parseLong(minutes.trim())));
+		} catch (RuntimeException ignored) {
+			// keep the default for this setting
 		}
+		try {
+			String count = properties.getProperty(BACKUP_COUNT);
+			if (count != null) settings = settings.withBackupCount(Integer.parseInt(count.trim()));
+		} catch (RuntimeException ignored) {
+			// keep the default for this setting
+		}
+		try {
+			String minutes = properties.getProperty(STALE_TIMEOUT_MINUTES);
+			if (minutes != null) settings = settings.withStaleTimeout(Duration.ofMinutes(Long.parseLong(minutes.trim())));
+		} catch (RuntimeException ignored) {
+			// keep the default for this setting
+		}
+		return settings;
 	}
 }

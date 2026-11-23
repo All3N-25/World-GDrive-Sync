@@ -13,8 +13,13 @@ import java.util.Properties;
  * What a Local Copy remembers about itself, kept in a small file inside the world folder so it
  * moves and is replaced together with the world. Never zipped (see {@link WorldZip}).
  */
-record LocalCopyRecord(int revision) {
+record LocalCopyRecord(int revision, boolean pendingUpload) {
 	static final String FILE_NAME = "world-gdrive-sync.properties";
+
+	/** A record with nothing waiting to be uploaded. */
+	LocalCopyRecord(int revision) {
+		this(revision, false);
+	}
 
 	static Optional<LocalCopyRecord> read(Path worldFolder) {
 		Path file = worldFolder.resolve(FILE_NAME);
@@ -22,7 +27,8 @@ record LocalCopyRecord(int revision) {
 		Properties properties = new Properties();
 		try (Reader in = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
 			properties.load(in);
-			return Optional.of(new LocalCopyRecord(Integer.parseInt(properties.getProperty("revision"))));
+			return Optional.of(new LocalCopyRecord(Integer.parseInt(properties.getProperty("revision")),
+					Boolean.parseBoolean(properties.getProperty("pendingUpload"))));
 		} catch (IOException | RuntimeException e) {
 			return Optional.empty();
 		}
@@ -31,6 +37,7 @@ record LocalCopyRecord(int revision) {
 	void write(Path worldFolder) throws IOException {
 		Properties properties = new Properties();
 		properties.setProperty("revision", Integer.toString(revision));
+		if (pendingUpload) properties.setProperty("pendingUpload", "true");
 		try (Writer out = Files.newBufferedWriter(worldFolder.resolve(FILE_NAME), StandardCharsets.UTF_8)) {
 			properties.store(out, "World GDrive Sync: what this Local Copy came from");
 		}

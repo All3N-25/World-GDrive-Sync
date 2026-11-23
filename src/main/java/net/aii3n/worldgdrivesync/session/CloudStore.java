@@ -33,6 +33,22 @@ public interface CloudStore {
 	void uploadCurrentSave(String worldId, Path zip, LongConsumer bytesSent) throws IOException;
 
 	/**
+	 * Stores {@code zip} as the world's new Current Save and moves the previous Current Save into the
+	 * world's Backups, labelled {@code previous}. The previous one stays the Current Save until the
+	 * new zip is fully stored, so a failed upload leaves the Current Save and the Backups as they were.
+	 *
+	 * @param bytesSent told how many bytes of the zip have been sent so far
+	 * @return the Backup the previous Current Save became
+	 */
+	Backup replaceCurrentSave(String worldId, Path zip, BackupLabel previous, LongConsumer bytesSent) throws IOException;
+
+	/** Every Backup of the world, in no particular order. */
+	List<Backup> listBackups(String worldId) throws IOException;
+
+	/** Deletes one Backup for good. */
+	void deleteBackup(String worldId, String backupId) throws IOException;
+
+	/**
 	 * Saves the world's Current Save zip to {@code zip}, replacing that file.
 	 *
 	 * @param progress told how many bytes have arrived so far, out of how many

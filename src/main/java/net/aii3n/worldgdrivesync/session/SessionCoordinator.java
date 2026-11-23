@@ -1,18 +1,19 @@
 package net.aii3n.worldgdrivesync.session;
 
-import net.aii3n.worldgdrivesync.settings.Settings;
-
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+
+import net.aii3n.worldgdrivesync.settings.Settings;
 
 /**
  * Owns every Shared World rule: sharing, listing with status, and (in later tickets) Play, Locks,
@@ -26,6 +27,7 @@ public final class SessionCoordinator {
 	private static final String STAGING_PREFIX = ".wgds-";
 	/** How long to wait after writing a Lock for a simultaneous one to show up in the cloud store. */
 	private static final Duration LOCK_SETTLE_TIME = Duration.ofSeconds(3);
+	private static final System.Logger LOGGER = System.getLogger(SessionCoordinator.class.getName());
 
 	private final CloudStore cloud;
 	private final SessionClock clock;
@@ -63,7 +65,7 @@ public final class SessionCoordinator {
 		for (CloudWorld world : cloud.listWorlds()) {
 			Optional<WorldMetadata> metadata = cloud.readMetadata(world.id());
 			if (metadata.isEmpty()) continue;
-			result.add(sharedWorld(world, metadata.get(), status(world.id())));
+			result.add(sharedWorld(world, metadata.get(), status(world.id()), hasPendingUpload(world.id())));
 		}
 		return result;
 	}
@@ -71,7 +73,25 @@ public final class SessionCoordinator {
 	/** This player's Local Copy of a Shared World, if they have one. */
 	public Optional<LocalCopy> localCopy(String worldId) {
 		Path folder = localCopies.resolve(worldId);
-		return LocalCopyRecord.read(folder).map(record -> new LocalCopy(folder, record.revision()));
+		return LocalCopyRecord.read(folder).map(record -> new LocalCopy(folder, record.revision(), record.pendingUpload()));
+	}
+
+	/**
+	 * The Shared Worlds whose Local Copy on this computer is a Pending Upload. Reads only the Local
+	 * Copy directory, so it works offline; the game retries each one on launch.
+	 */
+	public List<String> pendingUploads() throws IOException {
+		if (!Files.isDirectory(localCopies)) return List.of();
+		try (Stream<Path> folders = Files.list(localCopies)) {
+			return folders.map(folder -> folder.getFileName().toString())
+					.filter(worldId -> !worldId.startsWith(STAGING_PREFIX) && hasPendingUpload(worldId))
+					.sorted()
+					.toList();
+		}
+	}
+
+	private boolean hasPendingUpload(String worldId) {
+		return localCopy(worldId).map(LocalCopy::pendingUpload).orElse(false);
 	}
 
 	/**
@@ -209,17 +229,92 @@ public final class SessionCoordinator {
 	/**
 	 * Save-and-quit: uploads the Local Copy as the new Current Save, then releases the Lock. Call it
 	 * once the game has closed the world, so everything is on disk. The Lock is released only after
-	 * the upload succeeds; if it fails, this throws and the Lock is kept.
+	 * the upload succeeds. If it fails, this throws, the Lock is kept, and the Local Copy becomes a
+	 * Pending Upload (see {@link #retryPendingUpload}).
 	 */
 	public void quit(String worldId, ProgressListener progress) throws IOException {
 		LocalCopy local = localCopy(worldId).orElseThrow(() -> new IOException("No Local Copy of " + worldId + " to upload"));
-		upload(worldId, local.folder(), progress);
+		try {
+			upload(worldId, local.folder(), progress);
+		} catch (IOException | RuntimeException e) {
+			markPendingUpload(local, e);
+			throw e;
+		}
 		releaseLock(worldId);
 	}
 
 	/**
+	 * Retries a Pending Upload left by a failed {@link #quit}: uploads the Local Copy as the next
+	 * Revision, clears the Pending Upload and releases the Lock, just like a normal quit. If it fails
+	 * again, this throws and the Lock and the Pending Upload are kept.
+	 *
+	 * <p>It never overwrites a newer Revision or uploads under another Host: if someone else holds
+	 * the Lock, or the cloud has moved past the Local Copy's Revision (someone Took Over), this
+	 * throws without uploading and the Pending Upload is kept for crash recovery on Play.
+	 */
+	public void retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
+		LocalCopy local = localCopy(worldId).filter(LocalCopy::pendingUpload)
+				.orElseThrow(() -> new IOException("No Pending Upload of " + worldId + " on this computer"));
+		Optional<Lock> held = currentLock(worldId);
+		if (held.isPresent() && !held.get().heldBy(me)) {
+			throw new IOException(held.get().hostName() + " is hosting this world now, so your Pending Upload can't be uploaded");
+		}
+		WorldMetadata current = cloud.readMetadata(worldId)
+				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
+		if (current.revision() > local.revision()) {
+			throw new IOException("Someone uploaded Revision " + current.revision() + " since, so your Pending Upload won't overwrite it");
+		}
+		quit(worldId, progress);
+	}
+
+	/** Remembers in the Local Copy that it still has to be uploaded; {@code failure} is why. */
+	private static void markPendingUpload(LocalCopy local, Exception failure) {
+		try {
+			new LocalCopyRecord(local.revision(), true).write(local.folder());
+		} catch (IOException e) {
+			// The upload failure stays the one reported; the Lock is kept either way.
+			failure.addSuppressed(e);
+		}
+	}
+
+	/**
+	 * Whether this player is hosting the world and a periodic upload is due: periodic upload is
+	 * enabled and a whole interval has passed since the later of the last upload and the start of
+	 * hosting. Reads the cloud store, so check it now and then rather than every tick.
+	 */
+	public boolean periodicUploadDue(String worldId) throws IOException {
+		Settings current = settings.get();
+		if (!current.periodicUploadEnabled()) return false;
+		Optional<Lock> lock = currentLock(worldId);
+		if (lock.isEmpty() || !lock.get().heldBy(me)) return false;
+		Instant since = lock.get().startedAt();
+		Optional<WorldMetadata> metadata = cloud.readMetadata(worldId);
+		if (metadata.isPresent() && metadata.get().savedAt().isAfter(since)) since = metadata.get().savedAt();
+		return !clock.instant().isBefore(since.plus(current.periodicUploadInterval()));
+	}
+
+	/**
+	 * Uploads the world while it is being hosted, as the next Revision. The Host keeps the Lock and
+	 * nobody is kicked. {@code snapshot} is asked to save the open world and copy it into a folder
+	 * this method then uploads and deletes.
+	 *
+	 * @return the new Current Save's metadata
+	 */
+	public WorldMetadata periodicUpload(String worldId, WorldSnapshot snapshot, ProgressListener progress) throws IOException {
+		Files.createDirectories(localCopies);
+		Path folder = Files.createTempDirectory(localCopies, STAGING_PREFIX);
+		try {
+			snapshot.saveTo(folder);
+			return upload(worldId, folder, progress);
+		} finally {
+			deleteRecursively(folder);
+		}
+	}
+
+	/**
 	 * The one upload path, shared by every kind of upload: makes {@code worldFolder} the Current Save
-	 * at the next Revision, and records that Revision in the Local Copy.
+	 * at the next Revision, and records that Revision in the Local Copy. The previous Current Save
+	 * becomes a Backup, and the oldest Backups are deleted beyond the configured count.
 	 *
 	 * @param worldFolder the world to upload, already saved to disk and not being written to: the
 	 *                    Local Copy itself after the world has closed, or a snapshot of it
@@ -234,10 +329,12 @@ public final class SessionCoordinator {
 			WorldMetadata previous = cloud.readMetadata(worldId)
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
 
-			cloud.uploadCurrentSave(worldId, zip, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+			cloud.replaceCurrentSave(worldId, zip, BackupLabel.of(previous),
+					sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
 			cloud.writeMetadata(worldId, next);
 			new LocalCopyRecord(next.revision()).write(localCopies.resolve(worldId));
+			pruneBackups(worldId);
 			return next;
 		} finally {
 			Files.deleteIfExists(zip);
@@ -256,6 +353,30 @@ public final class SessionCoordinator {
 		if (mine.isEmpty()) return false;
 		cloud.writeLock(worldId, mine.get().heartbeatAt(clock.instant()));
 		return true;
+	}
+
+	/** A Shared World's Backups, newest first. */
+	public List<Backup> backups(String worldId) throws IOException {
+		List<Backup> backups = new ArrayList<>(cloud.listBackups(worldId));
+		backups.sort(Comparator.comparing(Backup::savedAt).reversed());
+		return backups;
+	}
+
+	/**
+	 * Deletes the oldest Backups until only the configured count remain. Best effort: the new
+	 * Current Save is already in place, so a failure here only leaves extra Backups, which the next
+	 * upload prunes.
+	 */
+	private void pruneBackups(String worldId) {
+		try {
+			List<Backup> newestFirst = backups(worldId);
+			int keep = settings.get().backupCount();
+			for (Backup old : newestFirst.subList(Math.min(keep, newestFirst.size()), newestFirst.size())) {
+				cloud.deleteBackup(worldId, old.id());
+			}
+		} catch (IOException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete old Backups of " + worldId + "; will retry after the next upload", e);
+		}
 	}
 
 	private void releaseLock(String worldId) throws IOException {
@@ -284,7 +405,11 @@ public final class SessionCoordinator {
 	}
 
 	private static SharedWorld sharedWorld(CloudWorld world, WorldMetadata metadata, WorldStatus status) {
-		return new SharedWorld(world.id(), world.name(), metadata.revision(), metadata.savedAt(), status);
+		return sharedWorld(world, metadata, status, false);
+	}
+
+	private static SharedWorld sharedWorld(CloudWorld world, WorldMetadata metadata, WorldStatus status, boolean pendingUpload) {
+		return new SharedWorld(world.id(), world.name(), metadata.revision(), metadata.savedAt(), status, pendingUpload);
 	}
 
 	private static void deleteRecursively(Path folder) throws IOException {

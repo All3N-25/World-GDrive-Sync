@@ -25,7 +25,10 @@
 	"world-gdrive-sync.progress.downloading": "Downloading… %s / %s MB",
 	"world-gdrive-sync.progress.unzipping": "Unpacking the world…",
 	"world-gdrive-sync.upload.title": "Uploading Shared World…",
-	"world-gdrive-sync.upload.failed": "Upload failed: %s. You still hold the Lock, so nobody else can start the world. Your progress is safe on this computer.",
+	"world-gdrive-sync.upload.failed": "Upload failed: %s. You still hold the Lock, so nobody else can start the world. Your progress is safe on this computer as a Pending Upload: it is retried the next time you start the game, or press Retry Upload on the Shared Worlds screen.",
+	"world-gdrive-sync.retry.failed": "Upload failed again: %s. Your progress is still a Pending Upload on this computer.",
+	"world-gdrive-sync.sharedWorlds.pendingUpload": "Pending Upload: your progress isn't in Google Drive yet",
+	"world-gdrive-sync.sharedWorlds.retry": "Retry Upload",
 	"world-gdrive-sync.status.free": "Free",
 	"world-gdrive-sync.status.hosted": "Hosted by %s (for %s)",
 	"world-gdrive-sync.status.stale": "Stale (%s, last seen %s ago)",
@@ -48,8 +51,12 @@
 	"world-gdrive-sync.settings.waitingForBrowser": "Sign in to the shared Google account in your web browser, then come back here. If the browser didn't open, copy the link and paste it into your browser.",
 	"world-gdrive-sync.settings.copyLink": "Copy Sign-in Link",
 	"world-gdrive-sync.settings.signInFailed": "Sign-in failed: %s",
+	"world-gdrive-sync.settings.clientMissing": "This build of the mod has no Google OAuth client configured, so it can't connect.",
+	"world-gdrive-sync.settings.backupCount": "Backups Kept: %s",
+	"world-gdrive-sync.settings.periodicUpload": "Upload while hosting",
+	"world-gdrive-sync.settings.periodicUpload.minutes": "Every %s min",
+	"world-gdrive-sync.settings.periodicUpload.tooltip": "While you host a Shared World, save it and upload it this often, so a crash loses at most this much progress. The world is always uploaded when you save and quit.",
 	"world-gdrive-sync.settings.staleTimeout": "Stale after",
-	"world-gdrive-sync.settings.staleTimeout.tooltip": "A Host whose game hasn't checked in for this long shows as Stale, and friends can Take Over.",
-	"world-gdrive-sync.settings.minutes": "%s min",
-	"world-gdrive-sync.settings.clientMissing": "This build of the mod has no Google OAuth client configured, so it can't connect."
+	"world-gdrive-sync.settings.staleTimeout.minutes": "%s min",
+	"world-gdrive-sync.settings.staleTimeout.tooltip": "A Host whose game hasn't checked in for this long shows as Stale, and friends can Take Over."
 }

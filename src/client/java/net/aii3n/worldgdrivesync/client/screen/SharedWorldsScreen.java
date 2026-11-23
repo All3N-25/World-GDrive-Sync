@@ -132,15 +132,27 @@ public class SharedWorldsScreen extends Screen {
 	}
 
 	private void updatePlayButton() {
-		if (playButton != null) playButton.active = list != null && list.getSelected() != null;
+		if (playButton == null) return;
+		SharedWorld selected = list != null && list.getSelected() != null ? list.getSelected().world : null;
+		playButton.active = selected != null;
+		// A Pending Upload goes up before anyone plays on: Play becomes Retry for that world.
+		playButton.setMessage(Component.translatable(selected != null && selected.pendingUpload()
+				? "world-gdrive-sync.sharedWorlds.retry" : "world-gdrive-sync.sharedWorlds.play"));
 	}
 
 	private void playSelected() {
 		if (list != null && list.getSelected() != null) play(list.getSelected().world);
 	}
 
-	/** Takes the Lock, downloads if needed and opens the world (see {@link PlayScreen}). */
+	/**
+	 * Takes the Lock, downloads if needed and opens the world (see {@link PlayScreen}); or, for a
+	 * Pending Upload, retries the upload (see {@link RetryUploadScreen}).
+	 */
 	private void play(SharedWorld world) {
+		if (world.pendingUpload()) {
+			minecraft.gui.setScreen(new RetryUploadScreen(this, world));
+			return;
+		}
 		minecraft.gui.setScreen(new PlayScreen(this, world));
 	}
 
@@ -229,6 +241,10 @@ public class SharedWorldsScreen extends Screen {
 				graphics.text(minecraft.font, world.name(), x, y, CommonColors.WHITE, false);
 				graphics.text(minecraft.font, Component.translatable("world-gdrive-sync.sharedWorlds.revision", world.revision())
 						.append(" · ").append(statusText(world.status())), x, y + 12, CommonColors.LIGHT_GRAY, false);
+				if (world.pendingUpload()) {
+					graphics.text(minecraft.font, Component.translatable("world-gdrive-sync.sharedWorlds.pendingUpload")
+							.withStyle(ChatFormatting.RED), x, y + 22, CommonColors.LIGHT_GRAY, false);
+				}
 			}
 		}
 	}

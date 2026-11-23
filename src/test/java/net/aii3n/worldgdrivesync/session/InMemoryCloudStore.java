@@ -34,16 +34,21 @@ final class InMemoryCloudStore implements CloudStore {
 	interface Hook {
 		void run() throws IOException;
 	}
+	private boolean failBackupDeletes;
 
 	private static final class Folder {
 		final String name;
 		WorldMetadata metadata;
 		byte[] currentSave;
 		final Map<String, Lock> locks = new LinkedHashMap<>();
+		final Map<String, StoredBackup> backups = new LinkedHashMap<>();
 
 		Folder(String name) {
 			this.name = name;
 		}
+	}
+
+	private record StoredBackup(Backup backup, byte[] zip) {
 	}
 
 	// --- CloudStore ---
@@ -75,13 +80,40 @@ final class InMemoryCloudStore implements CloudStore {
 	@Override
 	public synchronized void uploadCurrentSave(String worldId, Path zip, LongConsumer bytesSent) throws IOException {
 		Folder folder = folder(worldId);
+		folder.currentSave = send(zip, bytesSent);
+	}
+
+	@Override
+	public synchronized Backup replaceCurrentSave(String worldId, Path zip, BackupLabel previous, LongConsumer bytesSent) throws IOException {
+		Folder folder = folder(worldId);
+		if (folder.currentSave == null) throw new IOException("No Current Save in " + worldId + " to replace");
+		byte[] bytes = send(zip, bytesSent);
+		Backup backup = new Backup("backup-" + nextId++, previous);
+		folder.backups.put(backup.id(), new StoredBackup(backup, folder.currentSave));
+		folder.currentSave = bytes;
+		return backup;
+	}
+
+	@Override
+	public synchronized List<Backup> listBackups(String worldId) throws IOException {
+		return folder(worldId).backups.values().stream().map(StoredBackup::backup).toList();
+	}
+
+	@Override
+	public synchronized void deleteBackup(String worldId, String backupId) throws IOException {
+		if (failBackupDeletes) throw new IOException("Network down (simulated)");
+		if (folder(worldId).backups.remove(backupId) == null) throw new IOException("No such Backup: " + backupId);
+	}
+
+	/** "Sends" a zip in small chunks, failing partway when uploads are set to fail. */
+	private byte[] send(Path zip, LongConsumer bytesSent) throws IOException {
 		byte[] bytes = Files.readAllBytes(zip);
 		for (int sent = 0; sent < bytes.length; ) {
 			if (failUploads) throw new IOException("Network down (simulated)");
 			sent = Math.min(bytes.length, sent + CHUNK);
 			bytesSent.accept(sent);
 		}
-		folder.currentSave = bytes;
+		return bytes;
 	}
 
 	@Override
@@ -121,6 +153,11 @@ final class InMemoryCloudStore implements CloudStore {
 		failUploads = true;
 	}
 
+	/** The connection is back: uploads succeed again after {@link #failUploads}. */
+	void uploadsWork() {
+		failUploads = false;
+	}
+
 	/** From now on every download fails partway, like a dropped connection. */
 	void failDownloads() {
 		failDownloads = true;
@@ -139,6 +176,11 @@ final class InMemoryCloudStore implements CloudStore {
 		return worlds.get(worldId).locks.values().stream().map(Lock::hostName).toList();
 	}
 
+	/** From now on deleting a Backup fails. */
+	void failBackupDeletes() {
+		failBackupDeletes = true;
+	}
+
 	synchronized int worldCount() {
 		return worlds.size();
 	}
@@ -153,7 +195,15 @@ final class InMemoryCloudStore implements CloudStore {
 
 	/** The Current Save zip's files and their contents, by path inside the zip. */
 	synchronized Map<String, String> currentSaveEntries(String worldId) {
-		byte[] zip = worlds.get(worldId).currentSave;
+		return entries(worlds.get(worldId).currentSave);
+	}
+
+	/** A Backup zip's files and their contents, by path inside the zip. */
+	synchronized Map<String, String> backupEntries(String worldId, String backupId) {
+		return entries(worlds.get(worldId).backups.get(backupId).zip());
+	}
+
+	private static Map<String, String> entries(byte[] zip) {
 		if (zip == null) return null;
 		Map<String, String> entries = new TreeMap<>();
 		try (ZipInputStream in = new ZipInputStream(new ByteArrayInputStream(zip))) {
