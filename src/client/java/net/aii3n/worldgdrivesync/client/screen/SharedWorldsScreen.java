@@ -1,9 +1,7 @@
 package net.aii3n.worldgdrivesync.client.screen;
 
 import net.aii3n.worldgdrivesync.client.GoogleConnection;
-import net.aii3n.worldgdrivesync.client.SharedWorldLauncher;
 import net.aii3n.worldgdrivesync.client.SharedWorlds;
-import net.aii3n.worldgdrivesync.session.LocalCopy;
 import net.aii3n.worldgdrivesync.session.SharedWorld;
 import net.aii3n.worldgdrivesync.session.WorldStatus;
 import net.minecraft.ChatFormatting;
@@ -16,7 +14,6 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.layouts.HeaderAndFooterLayout;
 import net.minecraft.client.gui.layouts.LinearLayout;
-import net.minecraft.client.gui.screens.AlertScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
@@ -27,7 +24,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -40,8 +36,6 @@ public class SharedWorldsScreen extends Screen {
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this, 33, 60);
 	private @Nullable Button gearButton;
 	private @Nullable Button playButton;
-	/** Set while Play looks up the Local Copy, so a second press doesn't open the world twice. */
-	private boolean opening;
 	private @Nullable WorldList list;
 	private boolean shownConnected;
 
@@ -138,32 +132,16 @@ public class SharedWorldsScreen extends Screen {
 	}
 
 	private void updatePlayButton() {
-		if (playButton != null) playButton.active = !opening && list != null && list.getSelected() != null;
+		if (playButton != null) playButton.active = list != null && list.getSelected() != null;
 	}
 
 	private void playSelected() {
 		if (list != null && list.getSelected() != null) play(list.getSelected().world);
 	}
 
-	/**
-	 * Opens the world's Local Copy from {@code sharedsaves/}. No Lock or download yet: a world with no
-	 * Local Copy on this machine can't be played.
-	 */
+	/** Takes the Lock, downloads if needed and opens the world (see {@link PlayScreen}). */
 	private void play(SharedWorld world) {
-		if (opening) return;
-		opening = true;
-		updatePlayButton();
-		SharedWorlds.get().run(coordinator -> coordinator.localCopy(world.id())).whenCompleteAsync((found, error) -> {
-			opening = false;
-			Optional<LocalCopy> localCopy = error == null ? found : Optional.empty();
-			if (localCopy.isPresent()) {
-				SharedWorldLauncher.open(minecraft, localCopy.get(), this);
-			} else {
-				minecraft.gui.setScreen(new AlertScreen(() -> minecraft.gui.setScreen(this),
-						Component.translatable("world-gdrive-sync.play.noLocalCopy.title"),
-						Component.translatable("world-gdrive-sync.play.noLocalCopy", world.name())));
-			}
-		}, screenExecutor);
+		minecraft.gui.setScreen(new PlayScreen(this, world));
 	}
 
 	@Override

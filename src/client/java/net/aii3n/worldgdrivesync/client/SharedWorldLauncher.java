@@ -2,7 +2,6 @@ package net.aii3n.worldgdrivesync.client;
 
 import net.aii3n.worldgdrivesync.session.LocalCopy;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.worldselection.WorldOpenFlows;
 import net.minecraft.world.level.storage.LevelStorageSource;
 
@@ -25,13 +24,14 @@ public final class SharedWorldLauncher {
 	 * and backup prompts, loading, and saving into the Local Copy's own folder, since the integrated
 	 * server's storage access points there. Quitting returns to the title screen as usual.
 	 *
-	 * @param onCancel shown if the player backs out of a vanilla prompt or the world fails to load
+	 * @param onCancel run on the client thread if the player backs out of a vanilla prompt before the
+	 *                 world loads
 	 */
-	public static void open(Minecraft minecraft, LocalCopy localCopy, Screen onCancel) {
+	public static void open(Minecraft minecraft, LocalCopy localCopy, Runnable onCancel) {
 		Path folder = localCopy.folder();
 		// createDefault(dir) puts any pre-upgrade backups in <dir>/../backups, the vanilla backups/ folder.
 		LevelStorageSource sharedsaves = LevelStorageSource.createDefault(folder.getParent());
 		new WorldOpenFlows(minecraft, sharedsaves)
-				.openWorld(folder.getFileName().toString(), () -> minecraft.gui.setScreen(onCancel));
+				.openWorld(folder.getFileName().toString(), onCancel);
 	}
 }
