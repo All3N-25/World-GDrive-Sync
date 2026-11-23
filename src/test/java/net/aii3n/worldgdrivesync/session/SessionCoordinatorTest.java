@@ -70,6 +70,27 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void aSharedWorldsLocalCopyIsAWorldFolderDirectlyInSharedsavesThatTheGameCanOpen(@TempDir Path friendsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator friend = new SessionCoordinator(cloud, clock, friendsSharedsaves);
+		SharedWorld listed = friend.listSharedWorlds().getFirst();
+
+		// The game opens <sharedsaves>/<folder name>, so the Local Copy must sit directly in sharedsaves/.
+		LocalCopy local = coordinator().localCopy(listed.id()).orElseThrow();
+		assertEquals(sharedsaves, local.folder().getParent());
+		assertTrue(Files.isRegularFile(local.folder().resolve("level.dat")));
+		// The friend's machine has no Local Copy of it: Play can't open anything there yet.
+		assertEquals(Optional.empty(), friend.localCopy(shared.id()));
+	}
+
+	@Test
+	void aFolderInSharedsavesWithoutARecordIsNotALocalCopy() throws Exception {
+		write(sharedsaves.resolve("world-stray/level.dat"), "level data");
+
+		assertEquals(Optional.empty(), coordinator().localCopy("world-stray"));
+	}
+
+	@Test
 	void aWorldNeverSharedHasNoLocalCopy() {
 		assertEquals(Optional.empty(), coordinator().localCopy("world-unknown"));
 	}
