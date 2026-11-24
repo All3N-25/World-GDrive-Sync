@@ -11,3 +11,7 @@ Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Integration notes
+
+Before writing Minecraft code, read `docs/minecraft-26.3.md` (26.3 renamed many 1.21 APIs). Before touching OAuth, Drive or dependencies, read `docs/google-drive.md`.
