@@ -668,6 +668,46 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void aLockThatCouldntBeReleasedAfterQuitIsReleasedByTheNextHeartbeat(@TempDir Path bobsSharedsaves) throws Exception {
+		SessionCoordinator alice = coordinator();
+		SharedWorld shared = alice.share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) alice.play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		// The upload goes through, but the connection drops before the Lock can be deleted.
+		cloud.failLockDeletes();
+
+		WorldMetadata uploaded = alice.quit(shared.id(), ProgressListener.NONE);
+
+		assertEquals(2, uploaded.revision());
+		assertEquals(List.of(), alice.pendingUploads());
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+
+		cloud.lockDeletesWork();
+		clock.advance(Duration.ofMinutes(1));
+
+		assertEquals(List.of(), alice.heartbeatHeldLocks(), "a Lock let go is not reported as lost");
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+		assertEquals(WorldStatus.FREE, friend(bobsSharedsaves).listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void playingAgainBeforeALeftoverLockIsReleasedKeepsTheNewLock() throws Exception {
+		SessionCoordinator alice = coordinator();
+		SharedWorld shared = alice.share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		alice.play(shared.id(), ProgressListener.NONE);
+		cloud.failLockDeletes();
+		alice.quit(shared.id(), ProgressListener.NONE);
+		cloud.lockDeletesWork();
+		clock.advance(Duration.ofMinutes(5));
+
+		assertInstanceOf(PlayResult.Ready.class, alice.play(shared.id(), ProgressListener.NONE));
+		clock.advance(Duration.ofMinutes(1));
+
+		assertEquals(List.of(), alice.heartbeatHeldLocks());
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
 	void aFailedFinalUploadKeepsTheLockAndTheRevision(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		coordinator().play(shared.id(), ProgressListener.NONE);

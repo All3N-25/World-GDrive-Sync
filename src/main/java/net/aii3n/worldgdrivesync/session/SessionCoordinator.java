@@ -39,6 +39,12 @@ public final class SessionCoordinator {
 	private final Supplier<Settings> settings;
 	/** The worlds this player took the Lock on through this coordinator and hasn't released. */
 	private final Set<String> heldLocks = ConcurrentHashMap.newKeySet();
+	/**
+	 * Worlds whose Lock {@link #quit} couldn't delete after its upload succeeded; Heartbeats retry.
+	 * Synchronized on while retrying and while {@link #takeLock} cancels a retry, so a retry never
+	 * deletes a Lock just taken again.
+	 */
+	private final Set<String> locksToRelease = ConcurrentHashMap.newKeySet();
 
 	/** A coordinator with the default {@link Settings}. */
 	public SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me) {
@@ -232,6 +238,9 @@ public final class SessionCoordinator {
 	 *         has been deleted again)
 	 */
 	private Optional<Lock> takeLock(String worldId, Instant startedAt, boolean alreadyHeld) throws IOException {
+		synchronized (locksToRelease) {
+			locksToRelease.remove(worldId); // the Lock left behind by a quit is this new one now
+		}
 		cloud.writeLock(worldId, Lock.takenBy(me, startedAt));
 		try {
 			try {
@@ -352,7 +361,8 @@ public final class SessionCoordinator {
 	/**
 	 * Save-and-quit: uploads the Local Copy as the new Current Save, then releases the Lock. Call it
 	 * once the game has closed the world, so everything is on disk. The Lock is released only after
-	 * the upload succeeds. If it fails, this throws, the Lock is kept, and the Local Copy becomes a
+	 * the upload succeeds; if releasing it fails, the upload still counts and {@link
+	 * #heartbeatHeldLocks} keeps trying to release it. If the upload fails, this throws, the Lock is kept, and the Local Copy becomes a
 	 * Pending Upload (see {@link #retryPendingUpload}). It also fails that way if this player no
 	 * longer holds the Lock (a friend Took Over): the Local Copy is then never uploaded over the new
 	 * Host's world, and becomes an Unmerged Backup later instead.
@@ -368,7 +378,12 @@ public final class SessionCoordinator {
 			markPendingUpload(local.folder(), e);
 			throw e;
 		}
-		releaseLock(worldId);
+		try {
+			releaseLock(worldId);
+		} catch (IOException | RuntimeException e) {
+			locksToRelease.add(worldId);
+			LOGGER.log(System.Logger.Level.WARNING, "Uploaded " + worldId + " but couldn't release its Lock; will retry with the next Heartbeat", e);
+		}
 		return uploaded;
 	}
 
@@ -528,12 +543,27 @@ public final class SessionCoordinator {
 	 * final upload, and on while a Pending Upload keeps it. The game calls this once a minute on a
 	 * thread of its own, so a long download or upload doesn't hold the Heartbeats up.
 	 *
+	 * Also retries releasing any Lock {@link #quit} couldn't release after its upload.
+	 *
 	 * @return the worlds whose Lock this player has lost (a friend Took Over); each is reported once
-	 * @throws IOException if a Heartbeat couldn't be sent; the others are still tried
+	 * @throws IOException if a Heartbeat or release couldn't be sent; the others are still tried
 	 */
 	public List<String> heartbeatHeldLocks() throws IOException {
 		List<String> lost = new ArrayList<>();
 		IOException failure = null;
+		for (String worldId : List.copyOf(locksToRelease)) {
+			try {
+				synchronized (locksToRelease) {
+					if (locksToRelease.contains(worldId)) {
+						cloud.deleteLock(worldId, me.id());
+						locksToRelease.remove(worldId);
+					}
+				}
+			} catch (IOException e) {
+				if (failure == null) failure = e;
+				else failure.addSuppressed(e);
+			}
+		}
 		for (String worldId : List.copyOf(heldLocks)) {
 			try {
 				// A Lock released meanwhile is no longer in the set: not lost, just let go.
