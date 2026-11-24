@@ -140,7 +140,7 @@ public final class SessionCoordinator {
 	/**
 	 * Play: makes this player the Host. Takes the Lock before anything else, so nobody else can start
 	 * at the same time; is refused, changing nothing, while someone else holds it. Then makes sure
-	 * the Local Copy is the Current Revision, downloading it if this computer has an older one or
+	 * the Local Copy is at the Current Save's Revision, downloading it if this computer has an older one or
 	 * none. If that fails, the Lock is released again.
 	 *
 	 * @return {@link PlayResult.Ready} with the Local Copy to open, {@link PlayResult.Refused}, or
@@ -156,7 +156,7 @@ public final class SessionCoordinator {
 
 	/**
 	 * Takeover: Play despite a Stale Lock, after the player accepted that its Host's unsaved progress
-	 * may be lost. Replaces the Stale Lock with this player's and starts from the latest Current Save.
+	 * may be lost. Replaces the Stale Lock with this player's and starts from the Current Save.
 	 * Refused, changing nothing, if that Host's Heartbeat has resumed meanwhile.
 	 *
 	 * @return as {@link #play}, but never {@link PlayResult.Stale}
@@ -252,7 +252,7 @@ public final class SessionCoordinator {
 	/**
 	 * Applies the Revision rules to this computer's Local Copy:
 	 * <ol>
-	 *   <li>at or past the Current Revision: open it as it is (after a crash, this resumes the
+	 *   <li>at or past the Current Save's Revision: open it as it is (after a crash, this resumes the
 	 *       crashed session's progress);</li>
 	 *   <li>older, with unsaved progress (a crashed session or a Pending Upload), so someone else
 	 *       uploaded since: upload it as an Unmerged Backup, then download the Current Save;</li>

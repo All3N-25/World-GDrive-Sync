@@ -7,7 +7,8 @@ public sealed interface PlayResult {
 	/**
 	 * This player now holds the Lock and the Local Copy is ready: open it.
 	 *
-	 * @param localCopy      the Current Revision, or this player's own newer copy after a crash
+	 * @param localCopy      the Local Copy, at the Current Save's Revision, or this player's own copy
+	 *                       with a crashed session's progress on top of it
 	 * @param unmergedBackup set if this player's Local Copy had progress from a crashed session or a
 	 *                       Pending Upload, but someone else had uploaded a newer Revision since: that
 	 *                       progress was kept as this Unmerged Backup and the Local Copy replaced

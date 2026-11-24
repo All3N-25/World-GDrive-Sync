@@ -502,7 +502,7 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
-	void takeoverReplacesTheStaleLockAndStartsFromTheLatestCurrentSave(@TempDir Path bobsSharedsaves) throws Exception {
+	void takeoverReplacesTheStaleLockAndStartsFromTheCurrentSave(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		SessionCoordinator bob = friend(bobsSharedsaves);
 		bob.play(shared.id(), ProgressListener.NONE);
