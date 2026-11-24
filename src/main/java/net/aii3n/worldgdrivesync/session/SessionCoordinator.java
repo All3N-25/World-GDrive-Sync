@@ -151,7 +151,7 @@ public final class SessionCoordinator {
 		if (held.isPresent() && !held.get().heldBy(me)) {
 			return isStale(held.get()) ? new PlayResult.Stale(held.get()) : new PlayResult.Refused(held.get());
 		}
-		return becomeHost(worldId, progress);
+		return becomeHost(worldId, held.isPresent(), progress);
 	}
 
 	/**
@@ -167,7 +167,7 @@ public final class SessionCoordinator {
 			if (!isStale(held.get())) return new PlayResult.Refused(held.get());
 			cloud.deleteLock(worldId, held.get().hostId());
 		}
-		return becomeHost(worldId, progress);
+		return becomeHost(worldId, held.isPresent() && held.get().heldBy(me), progress);
 	}
 
 	/**
@@ -176,10 +176,13 @@ public final class SessionCoordinator {
 	 * <p>The cloud store can't create a Lock only if none exists (ADR-0001), so two players who press
 	 * Play together may both write one. After writing, wait for the other's Lock to show up, then the
 	 * earliest Lock wins; the loser deletes their own and is told who is hosting.
+	 *
+	 * @param alreadyHeld this player held the Lock before this call (left by a crashed session or a
+	 *                    Pending Upload), so it protects unsaved progress and must outlive a failure
 	 */
-	private PlayResult becomeHost(String worldId, ProgressListener progress) throws IOException {
+	private PlayResult becomeHost(String worldId, boolean alreadyHeld, ProgressListener progress) throws IOException {
 		Instant startedAt = clock.instant();
-		Optional<Lock> winner = takeLock(worldId, startedAt);
+		Optional<Lock> winner = takeLock(worldId, startedAt, alreadyHeld);
 		if (winner.isPresent()) return new PlayResult.Refused(winner.get());
 		try {
 			Optional<Backup> unmerged = bringLocalCopyUpToDate(worldId, progress);
@@ -224,10 +227,11 @@ public final class SessionCoordinator {
 	/**
 	 * Writes this player's Lock, waits for a simultaneous one to show up, and settles who won.
 	 *
+	 * @param alreadyHeld see {@link #becomeHost}: if set, a failure leaves the Lock in place
 	 * @return empty if this player now holds the Lock; otherwise the winner's Lock (this player's own
 	 *         has been deleted again)
 	 */
-	private Optional<Lock> takeLock(String worldId, Instant startedAt) throws IOException {
+	private Optional<Lock> takeLock(String worldId, Instant startedAt, boolean alreadyHeld) throws IOException {
 		cloud.writeLock(worldId, Lock.takenBy(me, startedAt));
 		try {
 			try {
@@ -244,7 +248,7 @@ public final class SessionCoordinator {
 			heldLocks.add(worldId);
 			return Optional.empty();
 		} catch (IOException | RuntimeException e) {
-			releaseLock(worldId);
+			if (!alreadyHeld) releaseLock(worldId);
 			throw e;
 		}
 	}
@@ -398,7 +402,7 @@ public final class SessionCoordinator {
 			return new RetryResult.KeptAsUnmergedBackup(unmerged);
 		}
 		Optional<Lock> held = currentLock(worldId);
-		if (held.isEmpty()) held = takeLock(worldId, clock.instant());
+		if (held.isEmpty()) held = takeLock(worldId, clock.instant(), false);
 		if (held.isPresent() && !held.get().heldBy(me)) {
 			throw new IOException(held.get().hostName() + " is hosting this world now, so your Pending Upload can't be uploaded");
 		}
@@ -563,7 +567,7 @@ public final class SessionCoordinator {
 	public RestoreResult restoreBackup(String worldId, String backupId) throws IOException {
 		Optional<Lock> held = currentLock(worldId);
 		if (held.isPresent()) return new RestoreResult.Refused(held.get());
-		Optional<Lock> winner = takeLock(worldId, clock.instant());
+		Optional<Lock> winner = takeLock(worldId, clock.instant(), false);
 		if (winner.isPresent()) return new RestoreResult.Refused(winner.get());
 		try {
 			WorldMetadata previous = cloud.readMetadata(worldId)

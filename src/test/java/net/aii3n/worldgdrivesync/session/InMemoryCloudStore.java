@@ -29,6 +29,7 @@ final class InMemoryCloudStore implements CloudStore {
 	private boolean failUploads;
 	private boolean failDownloads;
 	private boolean failMetadataReads;
+	private boolean failLockReads;
 	private boolean dropConnectionAfterNextReplace;
 	private final Map<Call, Hook> hooks = new EnumMap<>(Call.class);
 
@@ -172,6 +173,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized List<Lock> readLocks(String worldId) throws IOException {
+		if (failLockReads) throw new IOException("Network down (simulated)");
 		return List.copyOf(folder(worldId).locks.values());
 	}
 
@@ -228,6 +230,16 @@ final class InMemoryCloudStore implements CloudStore {
 	/** The connection is back: metadata reads succeed again after {@link #failMetadataReads}. */
 	void metadataReadsWork() {
 		failMetadataReads = false;
+	}
+
+	/** From now on reading a world's Locks fails, like a dropped connection. */
+	void failLockReads() {
+		failLockReads = true;
+	}
+
+	/** The connection is back: Lock reads succeed again after {@link #failLockReads}. */
+	void lockReadsWork() {
+		failLockReads = false;
 	}
 
 	/** From now on every download fails partway, like a dropped connection. */

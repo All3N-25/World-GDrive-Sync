@@ -254,6 +254,24 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void aResumedSessionWhoseLockCheckFailsKeepsTheLock(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy alices = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(alices.folder().resolve("region/r.0.0.mca"), "chunks with Alice's tower");
+		// Crash. Alice relaunches and presses Play; the cloud stops answering right after her Lock is rewritten.
+		clock.advance(Duration.ofMinutes(2));
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_WRITE, cloud::failLockReads);
+
+		assertThrows(IOException.class, () -> coordinator().play(shared.id(), ProgressListener.NONE));
+
+		cloud.lockReadsWork();
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+		assertEquals(List.of(shared.id()), coordinator().pendingUploads());
+		assertEquals("Alice", assertInstanceOf(PlayResult.Refused.class,
+				friend(bobsSharedsaves).play(shared.id(), ProgressListener.NONE)).heldBy().hostName());
+	}
+
+	@Test
 	void unmergedBackupsAreNeverDeletedByRotation(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		leaveAPendingUploadThenLetBobTakeOverAndUpload(shared.id(), bobsSharedsaves);
