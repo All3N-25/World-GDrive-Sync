@@ -44,7 +44,11 @@ dependencies {
 
 test {
 	useJUnitPlatform()
-	testLogging { events "passed", "skipped", "failed" }
+	testLogging {
+		events "passed", "skipped", "failed"
+		// Show which test failed and why even under -q, without digging through build/test-results.
+		quiet { events "failed"; exceptionFormat "full" }
+	}
 }
 
 // The Google OAuth client (see OAuthClient). Taken from the environment (CI secrets) or the
