@@ -20,6 +20,7 @@ Before adding any dependency, check that it ends up in the jar: `unzip -l build/
 - **`appProperties`** allow at most 124 bytes per key plus value, so keep keys to one or two letters. Anything bigger goes in a small JSON file's content (as the Lock does).
 - **Lock ordering** uses Drive's server-set `createdTime`, then the file ID, never players' clocks.
 - **Resumable uploads:** chunks must be multiples of 256 KiB. `308` means "send the next chunk" (read the `Range` header). On a dropped connection, query the committed offset with `Content-Range: bytes */<total>` and resume.
+- **Never let `java.net.http` follow redirects** for Drive calls: it treats the resumable upload's `308` as a redirect and throws "Invalid redirection" because there is no `Location`.
 - **`java.net.http` forbids setting `Content-Length`.** It comes from the body publisher, so send each chunk with `BodyPublishers.ofByteArray`.
 - **`DELETE`** is permanent; there is no trash.
 - **Stale status still depends on clocks.** It compares the viewer's clock with the Host's Heartbeat time. Computing "now" from the `Date` header of a Drive response would remove that dependency; not done yet.

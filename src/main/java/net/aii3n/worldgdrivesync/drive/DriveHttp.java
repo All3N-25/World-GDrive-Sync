@@ -40,7 +40,10 @@ final class DriveHttp {
 	private final GoogleAccount account;
 	private final HttpClient http = HttpClient.newBuilder()
 			.connectTimeout(Duration.ofSeconds(20))
-			.followRedirects(HttpClient.Redirect.NORMAL)
+			// NEVER: resumable uploads answer 308 "Resume Incomplete" with no Location header.
+			// Following redirects makes java.net.http treat that as a redirect and throw
+			// "Invalid redirection" before we can read the Range header.
+			.followRedirects(HttpClient.Redirect.NEVER)
 			.build();
 
 	DriveHttp(GoogleAccount account) {
