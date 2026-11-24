@@ -266,8 +266,10 @@ if confirm "Publish the app to production now? (You can switch it back to Testin
   pause "Press Enter once the status says In production."
 else
   SKIPPED+=("Publish the app to production (Auth Platform → Audience → Publish app), or sign-ins expire after 7 days")
-  warn "Left in Testing: add the shared account under Test users, and expect a new sign-in every 7 days."
-  pause
+  warn "Left in Testing: only listed test users can sign in (others get 'Error 403: access_denied')."
+  step "On this same Audience page, under Test users: Add users → the shared account's address → Save."
+  note "Test-user sign-ins expire every 7 days until the app is published."
+  pause "Press Enter once the shared account is listed as a test user."
 fi
 
 # ── 6 ─────────────────────────────────────────────────────────────────────
