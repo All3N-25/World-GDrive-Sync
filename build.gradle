@@ -47,6 +47,40 @@ test {
 	testLogging { events "passed", "skipped", "failed" }
 }
 
+// The Google OAuth client (see OAuthClient). Taken from the environment (CI secrets) or the
+// gitignored .env that scripts/setup-google-oauth.sh writes, so it never lands in the repo.
+// Without it the build still works, and the mod shows sign-in as unavailable.
+def dotenv = providers.fileContents(layout.projectDirectory.file(".env")).asText.orElse("")
+def oauthValue = { String key ->
+	providers.environmentVariable(key).orElse(dotenv.map { text ->
+		def line = text.readLines().reverse().find { it.startsWith("${key}=") }
+		if (line == null) return ""
+		def value = line.substring(key.length() + 1).trim()
+		if (value.length() >= 2 && (value[0] == "'" || value[0] == '"') && value[-1] == value[0]) {
+			value = value[1..-2].replace("'\\''", "'")
+		}
+		value
+	})
+}
+
+def generateOAuthClient = tasks.register("generateOAuthClient") {
+	def clientId = oauthValue("GDRIVE_CLIENT_ID")
+	def clientSecret = oauthValue("GDRIVE_CLIENT_SECRET")
+	def outDir = layout.buildDirectory.dir("generated/oauth")
+	inputs.property("clientId", clientId)
+	inputs.property("clientSecret", clientSecret)
+	outputs.dir(outDir)
+	doLast {
+		def file = outDir.get().file("world-gdrive-sync/oauth-client.properties").asFile
+		file.parentFile.mkdirs()
+		def props = new Properties()
+		props.setProperty("clientId", clientId.get())
+		props.setProperty("clientSecret", clientSecret.get())
+		file.withWriter("UTF-8") { props.store(it, null) }
+	}
+}
+sourceSets.main.resources.srcDir(generateOAuthClient)
+
 processResources {
 	def version = project.version
 	inputs.property "version", version

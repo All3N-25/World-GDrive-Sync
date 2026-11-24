@@ -10,7 +10,7 @@ Before adding any dependency, check that it ends up in the jar: `unzip -l build/
 
 ## OAuth
 
-- The OAuth client is a **Desktop app**. Google still requires its secret at the token endpoint, so both the ID and the secret are built into the mod (`OAuthClient`).
+- The OAuth client is a **Desktop app**. Google still requires its secret at the token endpoint, so both the ID and the secret are built into the mod (`OAuthClient`). They stay out of this public repo: the build reads `GDRIVE_CLIENT_ID` and `GDRIVE_CLIENT_SECRET` from the environment (CI secrets) or the gitignored `.env`, and `scripts/setup-google-oauth.sh` walks through creating the client and filling both in.
 - `access_type=offline` plus `prompt=consent` guarantees a refresh token. `invalid_grant` on refresh means the sign-in is gone; treat it as disconnected.
 - An app left in **Testing** mode gets refresh tokens that expire after 7 days. It must be published to production (ADR-0001). A production app without brand verification may still show Google's "unverified app" page; confirm in the Cloud console.
 - `drive.file` lets the mod see only files it created. Files added to the Drive by hand are invisible by design.
