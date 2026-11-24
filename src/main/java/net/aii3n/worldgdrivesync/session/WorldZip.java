@@ -13,16 +13,19 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
-/** Packs a world folder into a zip whose entries are relative to the world folder. */
-final class WorldZip {
+/** Packs a world folder into a zip whose entries are relative to the world folder, and copies world folders. */
+public final class WorldZip {
 	/**
 	 * Top-level files never packed or copied: Minecraft's {@code session.lock} (held open while the
 	 * world runs, and unreadable on Windows), and the Local Copy's own record.
 	 */
 	static final Set<String> SKIPPED = Set.of("session.lock", LocalCopyRecord.FILE_NAME);
 
-	/** Copies a world folder, leaving out the {@link #SKIPPED} files. */
-	static void copy(Path from, Path to) throws IOException {
+	/**
+	 * Copies a saved world folder, leaving out the open world's {@code session.lock} and the Local
+	 * Copy's own record, as every upload does.
+	 */
+	public static void copy(Path from, Path to) throws IOException {
 		for (Path file : worldFiles(from)) {
 			Path target = to.resolve(from.relativize(file).toString());
 			Files.createDirectories(target.getParent());

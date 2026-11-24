@@ -3,7 +3,7 @@ package net.aii3n.worldgdrivesync.client;
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.session.ProgressListener;
 import net.aii3n.worldgdrivesync.session.WorldMetadata;
-import net.aii3n.worldgdrivesync.session.WorldSnapshot;
+import net.aii3n.worldgdrivesync.session.WorldZip;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.server.MinecraftServer;
@@ -29,7 +29,7 @@ import java.util.concurrent.TimeoutException;
 final class PeriodicUpload {
 	private static final Duration CHECK_EVERY = Duration.ofMinutes(1);
 	private static final Duration RETRY_AFTER_FAILURE = Duration.ofMinutes(5);
-	private static final long SNAPSHOT_TIMEOUT_MINUTES = 2;
+	private static final long SAVE_TIMEOUT_MINUTES = 2;
 
 	// Client thread only.
 	private static Instant nextCheck = Instant.MIN;
@@ -53,7 +53,7 @@ final class PeriodicUpload {
 		inFlight = true;
 
 		SharedWorlds.get().run(coordinator -> coordinator.periodicUploadDue(worldId)
-				? coordinator.periodicUpload(worldId, folder -> snapshot(server, worldId, folder), ProgressListener.NONE)
+				? coordinator.periodicUpload(worldId, folder -> copyOpenWorld(server, worldId, folder), ProgressListener.NONE)
 				: null
 		).whenCompleteAsync((WorldMetadata uploaded, Throwable error) -> {
 			inFlight = false;
@@ -67,7 +67,7 @@ final class PeriodicUpload {
 	}
 
 	/** Network thread: has the server thread save the world and copy it into {@code folder}, and waits. */
-	private static void snapshot(MinecraftServer server, String worldId, Path folder) throws IOException {
+	private static void copyOpenWorld(MinecraftServer server, String worldId, Path folder) throws IOException {
 		try {
 			server.submit(() -> {
 				if (!server.isRunning() || !worldId.equals(HostingSession.hostedWorldId())) {
@@ -75,12 +75,12 @@ final class PeriodicUpload {
 				}
 				server.saveEverything(true, true, true);
 				try {
-					WorldSnapshot.copyWorld(server.getWorldPath(LevelResource.ROOT), folder);
+					WorldZip.copy(server.getWorldPath(LevelResource.ROOT), folder);
 				} catch (IOException e) {
 					throw new UncheckedIOException(e);
 				}
 				return null;
-			}).get(SNAPSHOT_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+			}).get(SAVE_TIMEOUT_MINUTES, TimeUnit.MINUTES);
 		} catch (ExecutionException e) {
 			if (e.getCause() instanceof UncheckedIOException unchecked) throw unchecked.getCause();
 			throw new IOException("Couldn't save the world for upload", e.getCause());

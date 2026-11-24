@@ -63,7 +63,7 @@ class SessionCoordinatorTest {
 		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
 		clock.advance(Duration.ofMinutes(30));
 		coordinator().heartbeat(shared.id());
-		coordinator().periodicUpload(shared.id(), snapshot -> WorldZip.copy(local.folder(), snapshot), ProgressListener.NONE);
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(local.folder(), folder), ProgressListener.NONE);
 		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house and garden");
 		// Alice's game crashes and she relaunches it a minute later, before the Lock goes Stale.
 		clock.advance(Duration.ofMinutes(1));
@@ -138,7 +138,7 @@ class SessionCoordinatorTest {
 		clock.advance(Duration.ofMinutes(30));
 		coordinator().heartbeat(shared.id());
 		// Revision 2 is in the cloud; then Alice builds more and her game crashes.
-		coordinator().periodicUpload(shared.id(), snapshot -> WorldZip.copy(alices.folder(), snapshot), ProgressListener.NONE);
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(alices.folder(), folder), ProgressListener.NONE);
 		write(alices.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house and tower");
 		clock.advance(Duration.ofMinutes(10));
 		SessionCoordinator bob = friend(bobsSharedsaves);
@@ -341,11 +341,11 @@ class SessionCoordinatorTest {
 		write(bobs.folder().resolve("region/r.0.0.mca"), "chunks with Bob's farm");
 		clock.advance(Duration.ofMinutes(30));
 		bob.heartbeat(shared.id());
-		bob.periodicUpload(shared.id(), snapshot -> WorldZip.copy(bobs.folder(), snapshot), ProgressListener.NONE);
+		bob.periodicUpload(shared.id(), folder -> WorldZip.copy(bobs.folder(), folder), ProgressListener.NONE);
 
 		// Alice's game wakes up and tries to upload, periodically and then on save and quit.
 		assertThrows(IOException.class, () -> coordinator().periodicUpload(shared.id(),
-				snapshot -> WorldZip.copy(alices.folder(), snapshot), ProgressListener.NONE));
+				folder -> WorldZip.copy(alices.folder(), folder), ProgressListener.NONE));
 		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
 
 		assertEquals(2, cloud.metadata(shared.id()).revision());
@@ -837,7 +837,7 @@ class SessionCoordinatorTest {
 		assertTrue(coordinator().periodicUploadDue(shared.id()));
 		coordinator().heartbeat(shared.id()); // the game sends one every minute while hosting
 
-		coordinator().periodicUpload(shared.id(), snapshot -> WorldZip.copy(local.folder(), snapshot), ProgressListener.NONE);
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(local.folder(), folder), ProgressListener.NONE);
 
 		assertEquals("chunks with Alice's house", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
 		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();

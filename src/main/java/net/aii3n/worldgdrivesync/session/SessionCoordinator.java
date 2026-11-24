@@ -435,16 +435,16 @@ public final class SessionCoordinator {
 
 	/**
 	 * Uploads the world while it is being hosted, as the next Revision. The Host keeps the Lock and
-	 * nobody is kicked. {@code snapshot} is asked to save the open world and copy it into a folder
+	 * nobody is kicked. {@code copier} is asked to save the open world and copy it into a folder
 	 * this method then uploads and deletes.
 	 *
 	 * @return the new Current Save's metadata
 	 */
-	public WorldMetadata periodicUpload(String worldId, WorldSnapshot snapshot, ProgressListener progress) throws IOException {
+	public WorldMetadata periodicUpload(String worldId, OpenWorldCopier copier, ProgressListener progress) throws IOException {
 		Files.createDirectories(localCopies);
 		Path folder = Files.createTempDirectory(localCopies, STAGING_PREFIX);
 		try {
-			snapshot.saveTo(folder);
+			copier.copyTo(folder);
 			return upload(worldId, folder, false, progress);
 		} finally {
 			deleteRecursively(folder);
@@ -457,7 +457,7 @@ public final class SessionCoordinator {
 	 * becomes a Backup, and the oldest Backups are deleted beyond the configured count.
 	 *
 	 * @param worldFolder the world to upload, already saved to disk and not being written to: the
-	 *                    Local Copy itself after the world has closed, or a snapshot of it
+	 *                    Local Copy itself after the world has closed, or a copy of the open world
 	 * @param endsSession whether this is the session's final upload: the Local Copy then no longer
 	 *                    counts as having unsaved progress. A periodic upload leaves that as it is.
 	 * @return the new Current Save's metadata
