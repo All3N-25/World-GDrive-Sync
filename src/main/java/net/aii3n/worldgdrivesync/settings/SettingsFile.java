@@ -1,12 +1,12 @@
 package net.aii3n.worldgdrivesync.settings;
 
+import net.aii3n.worldgdrivesync.io.AtomicFile;
+
 import java.io.IOException;
 import java.io.Reader;
-import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Properties;
 
@@ -39,17 +39,8 @@ public final class SettingsFile {
 		properties.setProperty(PERIODIC_UPLOAD_MINUTES, Long.toString(settings.periodicUploadInterval().toMinutes()));
 		properties.setProperty(BACKUP_COUNT, Integer.toString(settings.backupCount()));
 		properties.setProperty(STALE_TIMEOUT_MINUTES, Long.toString(settings.staleTimeout().toMinutes()));
-		Path folder = file.toAbsolutePath().getParent();
-		Files.createDirectories(folder);
-		Path temp = Files.createTempFile(folder, file.getFileName().toString(), ".tmp");
-		try {
-			try (Writer out = Files.newBufferedWriter(temp, StandardCharsets.UTF_8)) {
-				properties.store(out, "World GDrive Sync settings (periodicUploadMinutes=0 disables periodic upload)");
-			}
-			Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-		} finally {
-			Files.deleteIfExists(temp);
-		}
+		AtomicFile.write(file,
+				out -> properties.store(out, "World GDrive Sync settings (periodicUploadMinutes=0 disables periodic upload)"));
 	}
 
 	private static Settings read(Path file) {

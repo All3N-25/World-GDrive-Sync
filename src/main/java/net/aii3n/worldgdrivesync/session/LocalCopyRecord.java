@@ -1,8 +1,9 @@
 package net.aii3n.worldgdrivesync.session;
 
+import net.aii3n.worldgdrivesync.io.AtomicFile;
+
 import java.io.IOException;
 import java.io.Reader;
-import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -66,8 +67,8 @@ record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> se
 		properties.setProperty("revision", Integer.toString(revision));
 		if (pendingUpload) properties.setProperty("pendingUpload", "true");
 		sessionStartedAt.ifPresent(startedAt -> properties.setProperty("sessionStartedAt", startedAt.toString()));
-		try (Writer out = Files.newBufferedWriter(worldFolder.resolve(FILE_NAME), StandardCharsets.UTF_8)) {
-			properties.store(out, "World GDrive Sync: what this Local Copy came from");
-		}
+		// Atomic: a half-written record reads as no record, and Play would then replace the Local Copy.
+		AtomicFile.write(worldFolder.resolve(FILE_NAME),
+				out -> properties.store(out, "World GDrive Sync: what this Local Copy came from"));
 	}
 }
