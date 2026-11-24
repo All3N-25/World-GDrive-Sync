@@ -410,13 +410,58 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void heartbeatsKeepTheLockFreshThroughALongDownloadAndFinalUpload(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		// The game's Heartbeat thread beats once a minute while Bob's slow download and upload run.
+		cloud.beforeNext(InMemoryCloudStore.Call.DOWNLOAD, () -> beatEveryMinuteFor(bob, Duration.ofMinutes(8)));
+		LocalCopy bobs = ((PlayResult.Ready) bob.play(shared.id(), ProgressListener.NONE)).localCopy();
+		assertEquals(WorldStatus.Hosted.class, coordinator().listSharedWorlds().getFirst().status().getClass(), "not Stale after the download");
+		write(bobs.folder().resolve("region/r.0.0.mca"), "chunks with Bob's farm");
+		List<WorldStatus> seenDuringUpload = new ArrayList<>();
+		cloud.beforeNext(InMemoryCloudStore.Call.REPLACE, () -> {
+			beatEveryMinuteFor(bob, Duration.ofMinutes(8));
+			seenDuringUpload.add(coordinator().listSharedWorlds().getFirst().status());
+		});
+
+		bob.quit(shared.id(), ProgressListener.NONE);
+
+		assertEquals(WorldStatus.Hosted.class, seenDuringUpload.getFirst().getClass(), "not Stale during the final upload");
+		assertEquals(List.of(), bob.heartbeatHeldLocks(), "no Lock is held after quitting");
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void heartbeatsReportALockLostToATakeoverOnce(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator alice = coordinator();
+		alice.play(shared.id(), ProgressListener.NONE);
+		assertEquals(List.of(), alice.heartbeatHeldLocks());
+		clock.advance(Duration.ofMinutes(10));
+		friend(bobsSharedsaves).takeOver(shared.id(), ProgressListener.NONE);
+
+		assertEquals(List.of(shared.id()), alice.heartbeatHeldLocks());
+
+		assertEquals(List.of(), alice.heartbeatHeldLocks(), "a lost Lock is reported once, then forgotten");
+		assertEquals(List.of("Bob"), cloud.lockHolders(shared.id()));
+	}
+
+	/** What the game's Heartbeat thread does over {@code time}: a Heartbeat for every held Lock each minute. */
+	private void beatEveryMinuteFor(SessionCoordinator player, Duration time) throws IOException {
+		for (long minute = 0; minute < time.toMinutes(); minute++) {
+			clock.advance(Duration.ofMinutes(1));
+			player.heartbeatHeldLocks();
+		}
+	}
+
+	@Test
 	void aHeartbeatNeverPutsBackALockTakenOverWhileItWasBeingSent(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		coordinator().play(shared.id(), ProgressListener.NONE);
 		clock.advance(Duration.ofMinutes(10));
 		SessionCoordinator bob = friend(bobsSharedsaves);
 		// Alice's game wakes up and sends a Heartbeat; Bob's Takeover lands between its read and its write.
-		cloud.beforeNextLockWrite(() -> bob.takeOver(shared.id(), ProgressListener.NONE));
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_WRITE, () -> bob.takeOver(shared.id(), ProgressListener.NONE));
 
 		assertFalse(coordinator().heartbeat(shared.id()));
 
@@ -503,7 +548,7 @@ class SessionCoordinatorTest {
 		SessionCoordinator bob = friend(bobsSharedsaves);
 		List<PlayResult> bobsResult = new ArrayList<>();
 		// Both saw the world Free. Bob's Lock lands just before Alice's does.
-		cloud.beforeNextLockWrite(() -> bobsResult.add(bob.play(shared.id(), ProgressListener.NONE)));
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_WRITE, () -> bobsResult.add(bob.play(shared.id(), ProgressListener.NONE)));
 
 		PlayResult alicesResult = coordinator().play(shared.id(), ProgressListener.NONE);
 
@@ -521,7 +566,7 @@ class SessionCoordinatorTest {
 		SessionCoordinator bob = friend(bobsSharedsaves);
 		SessionCoordinator carol = new SessionCoordinator(cloud, clock, carolsSharedsaves, new Player("uuid-carol", "Carol"));
 		List<PlayResult> carolsResult = new ArrayList<>();
-		cloud.beforeNextLockWrite(() -> carolsResult.add(carol.takeOver(shared.id(), ProgressListener.NONE)));
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_WRITE, () -> carolsResult.add(carol.takeOver(shared.id(), ProgressListener.NONE)));
 
 		PlayResult bobsResult = bob.takeOver(shared.id(), ProgressListener.NONE);
 
@@ -1103,7 +1148,7 @@ class SessionCoordinatorTest {
 		Backup original = coordinator().backups(shared.id()).getFirst();
 		SessionCoordinator bob = friend(bobsSharedsaves);
 		List<PlayResult> alicesResult = new ArrayList<>();
-		cloud.beforeNextRestore(() -> alicesResult.add(coordinator().play(shared.id(), ProgressListener.NONE)));
+		cloud.beforeNext(InMemoryCloudStore.Call.RESTORE, () -> alicesResult.add(coordinator().play(shared.id(), ProgressListener.NONE)));
 
 		assertInstanceOf(RestoreResult.Restored.class, bob.restoreBackup(shared.id(), original.id()));
 
@@ -1119,7 +1164,7 @@ class SessionCoordinatorTest {
 		SessionCoordinator bob = friend(bobsSharedsaves);
 		List<PlayResult> alicesResult = new ArrayList<>();
 		// Both saw the world Free. Alice's Lock lands just before Bob's does.
-		cloud.beforeNextLockWrite(() -> alicesResult.add(coordinator().play(shared.id(), ProgressListener.NONE)));
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_WRITE, () -> alicesResult.add(coordinator().play(shared.id(), ProgressListener.NONE)));
 
 		RestoreResult result = bob.restoreBackup(shared.id(), original.id());
 

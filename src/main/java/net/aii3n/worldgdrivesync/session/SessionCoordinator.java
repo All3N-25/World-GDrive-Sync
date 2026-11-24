@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -22,6 +24,7 @@ import net.aii3n.worldgdrivesync.settings.Settings;
  * directory.
  *
  * <p>Every method blocks on the cloud store, so the game calls it off the render thread.
+ * {@link #heartbeatHeldLocks} may run on its own thread alongside any other call.
  */
 public final class SessionCoordinator {
 	private static final String STAGING_PREFIX = ".wgds-";
@@ -34,6 +37,8 @@ public final class SessionCoordinator {
 	private final Path localCopies;
 	private final Player me;
 	private final Supplier<Settings> settings;
+	/** The worlds this player took the Lock on through this coordinator and hasn't released. */
+	private final Set<String> heldLocks = ConcurrentHashMap.newKeySet();
 
 	/** A coordinator with the default {@link Settings}. */
 	public SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me) {
@@ -236,6 +241,7 @@ public final class SessionCoordinator {
 				releaseLock(worldId);
 				return winner;
 			}
+			heldLocks.add(worldId);
 			return Optional.empty();
 		} catch (IOException | RuntimeException e) {
 			releaseLock(worldId);
@@ -396,6 +402,7 @@ public final class SessionCoordinator {
 		if (held.isPresent() && !held.get().heldBy(me)) {
 			throw new IOException(held.get().hostName() + " is hosting this world now, so your Pending Upload can't be uploaded");
 		}
+		heldLocks.add(worldId); // Kept since before a restart, or just taken: Heartbeats from now on.
 		return new RetryResult.Uploaded(quit(worldId, progress));
 	}
 
@@ -511,6 +518,31 @@ public final class SessionCoordinator {
 		return cloud.refreshLock(worldId, current.get().heartbeatAt(clock.instant()));
 	}
 
+	/**
+	 * Sends a Heartbeat for every Lock this player holds, from the moment Play (or a retry, or a
+	 * restore) takes it until it is released: through the download, the hosting session and the
+	 * final upload, and on while a Pending Upload keeps it. The game calls this once a minute on a
+	 * thread of its own, so a long download or upload doesn't hold the Heartbeats up.
+	 *
+	 * @return the worlds whose Lock this player has lost (a friend Took Over); each is reported once
+	 * @throws IOException if a Heartbeat couldn't be sent; the others are still tried
+	 */
+	public List<String> heartbeatHeldLocks() throws IOException {
+		List<String> lost = new ArrayList<>();
+		IOException failure = null;
+		for (String worldId : List.copyOf(heldLocks)) {
+			try {
+				// A Lock released meanwhile is no longer in the set: not lost, just let go.
+				if (!heartbeat(worldId) && heldLocks.remove(worldId)) lost.add(worldId);
+			} catch (IOException e) {
+				if (failure == null) failure = e;
+				else failure.addSuppressed(e);
+			}
+		}
+		if (failure != null) throw failure;
+		return lost;
+	}
+
 	/** A Shared World's Backups, newest first. */
 	public List<Backup> backups(String worldId) throws IOException {
 		List<Backup> backups = new ArrayList<>(cloud.listBackups(worldId));
@@ -564,6 +596,8 @@ public final class SessionCoordinator {
 	}
 
 	private void releaseLock(String worldId) throws IOException {
+		// Forgotten first, so a Heartbeat racing this release can't report the Lock as lost.
+		heldLocks.remove(worldId);
 		cloud.deleteLock(worldId, me.id());
 	}
 

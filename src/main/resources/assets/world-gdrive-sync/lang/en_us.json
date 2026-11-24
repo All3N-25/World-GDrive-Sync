@@ -20,6 +20,8 @@
 	"world-gdrive-sync.takeOver.cancel": "Cancel",
 	"world-gdrive-sync.takeOver.warning.title": "Take Over?",
 	"world-gdrive-sync.takeOver.warning": "Any progress %s made since their last upload may be lost. You will start from the latest Current Save in Google Drive.",
+	"world-gdrive-sync.heartbeat.lockLost.title": "You Lost the Lock",
+	"world-gdrive-sync.heartbeat.lockLost": "A friend Took Over this Shared World. Your progress won't be uploaded over theirs; it stays on this computer and becomes an Unmerged Backup the next time you play.",
 	"world-gdrive-sync.play.unmerged.title": "Your Progress Is in Backups",
 	"world-gdrive-sync.play.unmerged": "Someone Took Over %s and uploaded a newer world while your progress from your last session wasn't uploaded yet. Your progress was kept as an Unmerged Backup with your name (see Backups), and you now continue from the newer world.",
 	"world-gdrive-sync.retry.unmerged": "Someone Took Over %s and uploaded a newer world, so your Pending Upload wasn't uploaded over it. It was kept as an Unmerged Backup with your name (see Backups), and your Local Copy is now the newer world.",

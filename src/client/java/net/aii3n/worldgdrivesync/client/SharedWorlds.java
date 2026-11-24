@@ -62,6 +62,14 @@ public final class SharedWorlds {
 		return instance;
 	}
 
+	/**
+	 * The coordinator itself, for the few calls made off the network thread (Heartbeats, which must
+	 * not wait behind a long upload). Blocks; never call it on the render thread.
+	 */
+	SessionCoordinator coordinator() {
+		return coordinator.get();
+	}
+
 	/** Runs {@code task} with the coordinator on the network thread. */
 	public <T> CompletableFuture<T> run(CoordinatorTask<T> task) {
 		return CompletableFuture.supplyAsync(() -> {

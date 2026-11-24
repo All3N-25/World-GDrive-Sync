@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,8 +30,19 @@ final class InMemoryCloudStore implements CloudStore {
 	private boolean failDownloads;
 	private boolean failMetadataReads;
 	private boolean dropConnectionAfterNextReplace;
-	private Hook beforeNextLockWrite;
-	private Hook beforeNextRestore;
+	private final Map<Call, Hook> hooks = new EnumMap<>(Call.class);
+
+	/** Cloud calls a test can step into with {@link #beforeNext}. */
+	enum Call {
+		/** Writing or refreshing a Lock. */
+		LOCK_WRITE,
+		/** Restoring a Backup. */
+		RESTORE,
+		/** Downloading the Current Save. */
+		DOWNLOAD,
+		/** Replacing the Current Save (every upload but the first). */
+		REPLACE
+	}
 
 	/** Something a test runs in the middle of a cloud call, such as another player's Play. */
 	@FunctionalInterface
@@ -85,6 +97,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized Backup replaceCurrentSave(String worldId, Path zip, WorldMetadata next, BackupLabel previous, LongConsumer bytesSent) throws IOException {
+		runHook(Call.REPLACE);
 		Folder folder = folder(worldId);
 		if (folder.currentSave == null) throw new IOException("No Current Save in " + worldId + " to replace");
 		byte[] bytes = send(zip, bytesSent);
@@ -115,9 +128,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized Backup restoreBackup(String worldId, String backupId, WorldMetadata next, BackupLabel previous) throws IOException {
-		Hook hook = beforeNextRestore;
-		beforeNextRestore = null;
-		if (hook != null) hook.run();
+		runHook(Call.RESTORE);
 		Folder folder = folder(worldId);
 		if (folder.currentSave == null) throw new IOException("No Current Save in " + worldId + " to replace");
 		StoredBackup chosen = folder.backups.remove(backupId);
@@ -148,6 +159,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized void downloadCurrentSave(String worldId, Path zip, BytesProgress progress) throws IOException {
+		runHook(Call.DOWNLOAD);
 		byte[] bytes = folder(worldId).currentSave;
 		if (bytes == null) throw new IOException("No Current Save in " + worldId);
 		for (int received = 0; received < bytes.length; ) {
@@ -165,22 +177,21 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized void writeLock(String worldId, Lock lock) throws IOException {
-		runHook();
+		runHook(Call.LOCK_WRITE);
 		folder(worldId).locks.put(lock.hostId(), lock);
 	}
 
 	@Override
 	public synchronized boolean refreshLock(String worldId, Lock lock) throws IOException {
-		runHook();
+		runHook(Call.LOCK_WRITE);
 		Map<String, Lock> locks = folder(worldId).locks;
 		if (!locks.containsKey(lock.hostId())) return false;
 		locks.put(lock.hostId(), lock);
 		return true;
 	}
 
-	private void runHook() throws IOException {
-		Hook hook = beforeNextLockWrite;
-		beforeNextLockWrite = null;
+	private void runHook(Call call) throws IOException {
+		Hook hook = hooks.remove(call);
 		if (hook != null) hook.run();
 	}
 
@@ -230,16 +241,11 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	/**
-	 * Runs {@code hook} just before the next Lock is written or refreshed, as if another player's
-	 * calls landed between this player reading the Locks and writing theirs.
+	 * Runs {@code hook} once, just before the next {@code call} does anything, as if another player's
+	 * calls (or this game's Heartbeat thread) landed in the middle of this one.
 	 */
-	synchronized void beforeNextLockWrite(Hook hook) {
-		beforeNextLockWrite = hook;
-	}
-
-	/** Runs {@code hook} just before the next Backup is restored, as if another player acted meanwhile. */
-	synchronized void beforeNextRestore(Hook hook) {
-		beforeNextRestore = hook;
+	synchronized void beforeNext(Call call, Hook hook) {
+		hooks.put(call, hook);
 	}
 
 	/** The names of the players holding a Lock on the world, oldest Lock first. */
