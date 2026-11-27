@@ -7,6 +7,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -20,7 +21,8 @@ final class FakeBrowser implements Consumer<URI> {
 	private final Function<Map<String, String>, String> answer;
 	volatile URI openedUri;
 	volatile Map<String, String> openedQuery;
-	volatile String redirectPage;
+	/** The page the loopback redirect showed; fails if the connection dropped before it arrived. */
+	final CompletableFuture<String> redirectPage = new CompletableFuture<>();
 
 	private FakeBrowser(Function<Map<String, String>, String> answer) {
 		this.answer = answer;
@@ -59,7 +61,10 @@ final class FakeBrowser implements Consumer<URI> {
 		if (answer == null) return;
 		URI redirect = URI.create(openedQuery.get("redirect_uri") + "?" + answer.apply(openedQuery));
 		http.sendAsync(HttpRequest.newBuilder(redirect).GET().build(), HttpResponse.BodyHandlers.ofString())
-				.thenAccept(response -> redirectPage = response.body());
+				.whenComplete((response, error) -> {
+					if (error != null) redirectPage.completeExceptionally(error);
+					else redirectPage.complete(response.body());
+				});
 	}
 
 	private static String enc(String s) {

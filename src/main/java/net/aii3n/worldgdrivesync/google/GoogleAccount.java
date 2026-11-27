@@ -224,15 +224,16 @@ public final class GoogleAccount {
 	private static void answerRedirect(HttpExchange exchange, String expectedState, CompletableFuture<String> code) throws IOException {
 		Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
 		String page;
+		Runnable settle;
 		if (query.containsKey("error")) {
-			code.completeExceptionally(new GoogleAuthException("Google sign-in was not completed: " + query.get("error")));
+			settle = () -> code.completeExceptionally(new GoogleAuthException("Google sign-in was not completed: " + query.get("error")));
 			page = "Sign-in was cancelled. You can close this tab and return to Minecraft.";
 		} else if (query.containsKey("code")) {
 			if (expectedState.equals(query.get("state"))) {
-				code.complete(query.get("code"));
+				settle = () -> code.complete(query.get("code"));
 				page = "Signed in. You can close this tab and return to Minecraft.";
 			} else {
-				code.completeExceptionally(new GoogleAuthException("Sign-in answer didn't match this sign-in attempt"));
+				settle = () -> code.completeExceptionally(new GoogleAuthException("Sign-in answer didn't match this sign-in attempt"));
 				page = "This sign-in link is out of date. Start again from Minecraft.";
 			}
 		} else {
@@ -241,12 +242,20 @@ public final class GoogleAccount {
 			exchange.close();
 			return;
 		}
-		byte[] body = ("<!doctype html><meta charset=utf-8><title>World GDrive Sync</title><p>" + page + "</p>")
-				.getBytes(StandardCharsets.UTF_8);
-		exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
-		exchange.sendResponseHeaders(200, body.length);
-		exchange.getResponseBody().write(body);
-		exchange.close();
+		// Settling the code stops this server, which would drop the connection, so send the page first.
+		try {
+			byte[] body = ("<!doctype html><meta charset=utf-8><title>World GDrive Sync</title><p>" + page + "</p>")
+					.getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+			// Stops the browser reusing this connection (say, for a favicon) just as the server stops,
+			// which would reset it and could discard the page.
+			exchange.getResponseHeaders().set("Connection", "close");
+			exchange.sendResponseHeaders(200, body.length);
+			exchange.getResponseBody().write(body);
+			exchange.close();
+		} finally {
+			settle.run();
+		}
 	}
 
 	private CompletableFuture<JsonObject> exchangeCode(String code, String redirectUri, String verifier) {

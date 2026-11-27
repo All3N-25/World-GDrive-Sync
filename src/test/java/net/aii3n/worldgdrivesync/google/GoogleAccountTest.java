@@ -33,6 +33,11 @@ class GoogleAccountTest {
 		google.close();
 	}
 
+	/** The whole page the loopback redirect should send the browser. */
+	private static String page(String message) {
+		return "<!doctype html><meta charset=utf-8><title>World GDrive Sync</title><p>" + message + "</p>";
+	}
+
 	private GoogleAccount newAccount() {
 		return new GoogleAccount(configDir.resolve("google-token.json"), CLIENT, google.endpoints());
 	}
@@ -40,11 +45,13 @@ class GoogleAccountTest {
 	@Test
 	void signingInThroughTheBrowserConnectsTheSharedAccount() throws Exception {
 		GoogleAccount account = newAccount();
+		FakeBrowser browser = FakeBrowser.approving(google);
 
-		String connected = account.signIn(FakeBrowser.approving(google)).result().get(5, TimeUnit.SECONDS);
+		String connected = account.signIn(browser).result().get(5, TimeUnit.SECONDS);
 
 		assertEquals(FakeGoogle.ACCOUNT_EMAIL, connected);
 		assertEquals(Optional.of(FakeGoogle.ACCOUNT_EMAIL), account.connectedAccount());
+		assertEquals(page("Signed in. You can close this tab and return to Minecraft."), browser.redirectPage.get(5, TimeUnit.SECONDS));
 	}
 
 	@Test
@@ -94,19 +101,23 @@ class GoogleAccountTest {
 	}
 
 	@Test
-	void declinedInTheBrowserLeavesThePlayerDisconnected() {
-		SignIn signIn = newAccount().signIn(FakeBrowser.denying());
+	void declinedInTheBrowserLeavesThePlayerDisconnected() throws Exception {
+		FakeBrowser browser = FakeBrowser.denying();
+		SignIn signIn = newAccount().signIn(browser);
 
 		assertThrows(ExecutionException.class, () -> signIn.result().get(5, TimeUnit.SECONDS));
 		assertEquals(Optional.empty(), newAccount().connectedAccount());
+		assertEquals(page("Sign-in was cancelled. You can close this tab and return to Minecraft."), browser.redirectPage.get(5, TimeUnit.SECONDS));
 	}
 
 	@Test
-	void anAnswerFromAnotherSignInAttemptIsRejected() {
-		SignIn signIn = newAccount().signIn(FakeBrowser.forgingState(google));
+	void anAnswerFromAnotherSignInAttemptIsRejected() throws Exception {
+		FakeBrowser browser = FakeBrowser.forgingState(google);
+		SignIn signIn = newAccount().signIn(browser);
 
 		assertThrows(ExecutionException.class, () -> signIn.result().get(5, TimeUnit.SECONDS));
 		assertEquals(Optional.empty(), newAccount().connectedAccount());
+		assertEquals(page("This sign-in link is out of date. Start again from Minecraft."), browser.redirectPage.get(5, TimeUnit.SECONDS));
 	}
 
 	@Test
