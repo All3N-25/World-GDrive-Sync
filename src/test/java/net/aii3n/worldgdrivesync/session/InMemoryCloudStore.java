@@ -53,6 +53,8 @@ final class InMemoryCloudStore implements CloudStore {
 		void run() throws IOException;
 	}
 	private boolean failBackupDeletes;
+	private Runnable afterChunkSent = () -> {
+	};
 
 	private static final class Folder {
 		final String name;
@@ -124,8 +126,13 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	@Override
-	public synchronized Backup replaceCurrentSave(String worldId, Path zip, WorldMetadata next, BackupLabel previous, LongConsumer bytesSent) throws IOException {
+	public Backup replaceCurrentSave(String worldId, Path zip, WorldMetadata next, BackupLabel previous, LongConsumer bytesSent) throws IOException {
+		// Outside the monitor, so a hook that blocks (a slow upload) doesn't hold up other calls.
 		runHook(Call.REPLACE);
+		return storeReplacement(worldId, zip, next, previous, bytesSent);
+	}
+
+	private synchronized Backup storeReplacement(String worldId, Path zip, WorldMetadata next, BackupLabel previous, LongConsumer bytesSent) throws IOException {
 		Folder folder = folder(worldId);
 		if (folder.currentSave == null) throw new IOException("No Current Save in " + worldId + " to replace");
 		byte[] bytes = send(zip, bytesSent);
@@ -183,6 +190,7 @@ final class InMemoryCloudStore implements CloudStore {
 			if (failUploads) throw new IOException("Network down (simulated)");
 			sent = Math.min(bytes.length, sent + CHUNK);
 			bytesSent.accept(sent);
+			afterChunkSent.run();
 		}
 		return bytes;
 	}
@@ -224,7 +232,10 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	private void runHook(Call call) throws IOException {
-		Hook hook = hooks.remove(call);
+		Hook hook;
+		synchronized (this) {
+			hook = hooks.remove(call);
+		}
 		if (hook != null) hook.run();
 	}
 
@@ -239,6 +250,11 @@ final class InMemoryCloudStore implements CloudStore {
 	/** From now on every upload fails partway, like a dropped connection. */
 	void failUploads() {
 		failUploads = true;
+	}
+
+	/** Runs {@code watcher} each time an upload has reported another chunk as sent. */
+	synchronized void afterEachChunkSent(Runnable watcher) {
+		afterChunkSent = watcher;
 	}
 
 	/** The connection is back: uploads succeed again after {@link #failUploads}. */

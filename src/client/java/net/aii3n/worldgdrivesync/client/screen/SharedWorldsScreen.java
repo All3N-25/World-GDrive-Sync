@@ -2,6 +2,7 @@ package net.aii3n.worldgdrivesync.client.screen;
 
 import net.aii3n.worldgdrivesync.client.GoogleConnection;
 import net.aii3n.worldgdrivesync.client.SharedWorlds;
+import net.aii3n.worldgdrivesync.session.LaunchRetry;
 import net.aii3n.worldgdrivesync.session.SharedWorld;
 import net.aii3n.worldgdrivesync.session.WorldStatus;
 import net.minecraft.ChatFormatting;
@@ -24,14 +25,19 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * Lists every Shared World on the account with its status. Reads Drive each time the screen is
- * opened (or returned to) and when Refresh is pressed.
+ * opened (or returned to), when Refresh is pressed, and when the launch retry of a Pending Upload
+ * ends. A world that retry is still working on shows its progress and can't be played.
  */
 public class SharedWorldsScreen extends Screen {
 	private static final Component TITLE = Component.translatable("world-gdrive-sync.sharedWorlds.title");
+	private static final Tooltip PLAY_WHILE_RETRYING =
+			Tooltip.create(Component.translatable("world-gdrive-sync.sharedWorlds.playWhileRetrying"));
 	private final Screen lastScreen;
 	private final HeaderAndFooterLayout layout = new HeaderAndFooterLayout(this, 33, 60);
 	private @Nullable Button gearButton;
@@ -44,6 +50,10 @@ public class SharedWorldsScreen extends Screen {
 	private @Nullable List<SharedWorld> worlds;
 	private @Nullable String loadError;
 	private int loadRequest;
+	/** {@link LaunchRetry#endedCount} when the latest list was asked for. */
+	private long listRequestedAt;
+	/** {@link #listRequestedAt} of the list on screen. */
+	private long listedAt;
 
 	public SharedWorldsScreen(Screen lastScreen) {
 		super(TITLE);
@@ -58,24 +68,34 @@ public class SharedWorldsScreen extends Screen {
 
 	private void refresh() {
 		if (!GoogleConnection.get().account().isConnected()) return;
-		int request = ++loadRequest;
 		worlds = null;
 		loadError = null;
-		SharedWorlds.get().run(coordinator -> coordinator.listSharedWorlds()).whenCompleteAsync((result, error) -> {
+		load();
+		if (minecraft != null && width > 0) rebuildWidgets();
+	}
+
+	/** Reads the list again, leaving what is on screen until the answer arrives. */
+	private void load() {
+		int request = ++loadRequest;
+		long requestedAt = SharedWorlds.get().launchRetry().endedCount();
+		listRequestedAt = requestedAt;
+		SharedWorlds.get().listSharedWorlds().whenCompleteAsync((result, error) -> {
 			if (request != loadRequest) return;
 			if (error != null) {
 				loadError = SharedWorlds.describe(error);
 			} else {
+				loadError = null;
+				listedAt = requestedAt;
 				worlds = result.stream().sorted(Comparator.comparing(SharedWorld::name, String.CASE_INSENSITIVE_ORDER)).toList();
 			}
 			rebuildWidgets();
 		}, screenExecutor);
-		if (minecraft != null && width > 0) rebuildWidgets();
 	}
 
 	@Override
 	protected void init() {
 		shownConnected = GoogleConnection.get().account().isConnected();
+		String selectedId = list != null && list.getSelected() != null ? list.getSelected().world.id() : null;
 		layout.removeChildren();
 		list = null;
 		layout.addTitleHeader(TITLE, font);
@@ -94,7 +114,9 @@ public class SharedWorldsScreen extends Screen {
 		} else if (worlds.isEmpty()) {
 			layout.addToContents(text(Component.translatable("world-gdrive-sync.sharedWorlds.empty")));
 		} else {
-			list = layout.addToContents(new WorldList(minecraft, width, layout.getContentHeight(), layout.getHeaderHeight(), worlds, this::play));
+			list = layout.addToContents(new WorldList(minecraft, width, layout.getContentHeight(), layout.getHeaderHeight(), worlds,
+					this::play, () -> listedAt));
+			list.select(selectedId);
 		}
 
 		LinearLayout footer = layout.addToFooter(LinearLayout.vertical().spacing(4));
@@ -138,10 +160,16 @@ public class SharedWorldsScreen extends Screen {
 	private void updatePlayButton() {
 		if (playButton == null) return;
 		SharedWorld selected = list != null && list.getSelected() != null ? list.getSelected().world : null;
-		playButton.active = selected != null;
+		boolean retrying = selected != null && blocksPlay(selected);
+		playButton.active = selected != null && !retrying;
+		playButton.setTooltip(retrying ? PLAY_WHILE_RETRYING : null);
 		// A Pending Upload goes up before anyone plays on: Play becomes Retry for that world.
 		playButton.setMessage(Component.translatable(selected != null && selected.pendingUpload()
 				? "world-gdrive-sync.sharedWorlds.retry" : "world-gdrive-sync.sharedWorlds.play"));
+	}
+
+	private boolean blocksPlay(SharedWorld world) {
+		return SharedWorlds.get().launchRetry().blocksPlay(world.id(), listedAt);
 	}
 
 	private void updateBackupsButton() {
@@ -161,6 +189,7 @@ public class SharedWorldsScreen extends Screen {
 	 * Pending Upload, retries the upload (see {@link RetryUploadScreen}).
 	 */
 	private void play(SharedWorld world) {
+		if (blocksPlay(world)) return;
 		if (world.pendingUpload()) {
 			minecraft.gui.setScreen(new RetryUploadScreen(this, world));
 			return;
@@ -170,6 +199,8 @@ public class SharedWorldsScreen extends Screen {
 
 	@Override
 	public void tick() {
+		// A launch retry ended: read how that world stands now.
+		if (shownConnected && SharedWorlds.get().launchRetry().endedCount() != listRequestedAt) load();
 		updatePlayButton();
 		updateBackupsButton();
 		// Connecting or disconnecting happens elsewhere (settings, or a revoked sign-in found mid-call).
@@ -215,9 +246,15 @@ public class SharedWorldsScreen extends Screen {
 	}
 
 	private static final class WorldList extends ObjectSelectionList<WorldList.Entry> {
-		WorldList(Minecraft minecraft, int width, int height, int y, List<SharedWorld> worlds, Consumer<SharedWorld> play) {
+		WorldList(Minecraft minecraft, int width, int height, int y, List<SharedWorld> worlds, Consumer<SharedWorld> play,
+				LongSupplier listedAt) {
 			super(minecraft, width, height, y, 36);
-			for (SharedWorld world : worlds) addEntry(new Entry(minecraft, world, play));
+			for (SharedWorld world : worlds) addEntry(new Entry(minecraft, world, play, listedAt));
+		}
+
+		/** Selects the world with this id, if it is listed. */
+		void select(@Nullable String worldId) {
+			children().stream().filter(entry -> entry.world.id().equals(worldId)).findFirst().ifPresent(this::setSelected);
 		}
 
 		@Override
@@ -229,11 +266,13 @@ public class SharedWorldsScreen extends Screen {
 			private final Minecraft minecraft;
 			private final SharedWorld world;
 			private final Consumer<SharedWorld> play;
+			private final LongSupplier listedAt;
 
-			Entry(Minecraft minecraft, SharedWorld world, Consumer<SharedWorld> play) {
+			Entry(Minecraft minecraft, SharedWorld world, Consumer<SharedWorld> play, LongSupplier listedAt) {
 				this.minecraft = minecraft;
 				this.world = world;
 				this.play = play;
+				this.listedAt = listedAt;
 			}
 
 			@Override
@@ -252,12 +291,26 @@ public class SharedWorldsScreen extends Screen {
 				int x = getContentX() + 3;
 				int y = getContentY() + 1;
 				graphics.text(minecraft.font, world.name(), x, y, CommonColors.WHITE, false);
+				// The list is older than the end of this world's retry: its Revision and status are out of date.
+				boolean outOfDate = SharedWorlds.get().launchRetry().endedSince(world.id(), listedAt.getAsLong());
+				Optional<LaunchRetry.State> retry = SharedWorlds.get().launchRetry().state(world.id());
 				graphics.text(minecraft.font, Component.translatable("world-gdrive-sync.sharedWorlds.revision", world.revision())
 						.append(" · ").append(statusText(world.status())), x, y + 12, CommonColors.LIGHT_GRAY, false);
-				if (world.pendingUpload()) {
-					graphics.text(minecraft.font, Component.translatable("world-gdrive-sync.sharedWorlds.pendingUpload")
-							.withStyle(ChatFormatting.RED), x, y + 22, CommonColors.LIGHT_GRAY, false);
-				}
+				Component upload = retry.map(Entry::retryText).orElseGet(() -> {
+					if (outOfDate) return Component.translatable("world-gdrive-sync.sharedWorlds.loading");
+					return world.pendingUpload()
+							? Component.translatable("world-gdrive-sync.sharedWorlds.pendingUpload").withStyle(ChatFormatting.RED)
+							: null;
+				});
+				if (upload != null) graphics.text(minecraft.font, upload, x, y + 22, CommonColors.LIGHT_GRAY, false);
+			}
+
+			private static Component retryText(LaunchRetry.State state) {
+				return (switch (state) {
+					case LaunchRetry.State.Waiting waiting -> Component.translatable("world-gdrive-sync.sharedWorlds.retryWaiting");
+					case LaunchRetry.State.Uploading uploading ->
+							Component.translatable("world-gdrive-sync.sharedWorlds.retryUploading", uploading.percent());
+				}).withStyle(ChatFormatting.YELLOW);
 			}
 		}
 	}

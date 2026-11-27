@@ -24,7 +24,8 @@ import net.aii3n.worldgdrivesync.settings.Settings;
  * directory.
  *
  * <p>Every method blocks on the cloud store, so the game calls it off the render thread.
- * {@link #heartbeatHeldLocks} may run on its own thread alongside any other call.
+ * {@link #heartbeatHeldLocks} and {@link #listSharedWorlds} may each run on a thread of their own
+ * alongside any other call.
  */
 public final class SessionCoordinator {
 	private static final String STAGING_PREFIX = ".wgds-";
@@ -70,6 +71,9 @@ public final class SessionCoordinator {
 	/**
 	 * Every Shared World on the account, read fresh from the cloud store. A world whose sharing never
 	 * finished (no metadata yet) is left out.
+	 *
+	 * <p>Changes nothing, so it may run alongside any other call: it only reads the cloud store and
+	 * the Local Copy records.
 	 */
 	public List<SharedWorld> listSharedWorlds() throws IOException {
 		List<SharedWorld> result = new ArrayList<>();
@@ -332,8 +336,10 @@ public final class SessionCoordinator {
 			WorldZip.unzip(zip, staging, progress);
 			new LocalCopyRecord(current.revision()).write(staging);
 			Path folder = localCopies.resolve(worldId);
-			deleteRecursively(folder);
-			Files.move(staging, folder);
+			synchronized (LocalCopyRecord.class) { // not while a listing reads the old record
+				deleteRecursively(folder);
+				Files.move(staging, folder);
+			}
 		} finally {
 			Files.deleteIfExists(zip);
 			deleteRecursively(staging);

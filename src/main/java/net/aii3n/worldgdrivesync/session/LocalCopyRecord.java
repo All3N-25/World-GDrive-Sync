@@ -22,6 +22,11 @@ import java.util.Properties;
  *                         session crashed (or the game was closed), so the copy may hold progress
  *                         the cloud doesn't have, even if its Revision matches the cloud's (a
  *                         periodic upload updates the Revision mid-session).
+ *
+ * <p>Listing Shared Worlds reads records while an upload or download replaces them on another
+ * thread. {@link #read} and {@link #write} take turns on this class's monitor, because Windows
+ * refuses to rename over, or delete the folder of, a file that is open. Take it too before deleting
+ * or moving a Local Copy's folder.
  */
 record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> sessionStartedAt) {
 	static final String FILE_NAME = "world-gdrive-sync.properties";
@@ -48,7 +53,7 @@ record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> se
 		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt);
 	}
 
-	static Optional<LocalCopyRecord> read(Path worldFolder) {
+	static synchronized Optional<LocalCopyRecord> read(Path worldFolder) {
 		Path file = worldFolder.resolve(FILE_NAME);
 		if (!Files.isRegularFile(file)) return Optional.empty();
 		Properties properties = new Properties();
@@ -67,8 +72,10 @@ record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> se
 		properties.setProperty("revision", Integer.toString(revision));
 		if (pendingUpload) properties.setProperty("pendingUpload", "true");
 		sessionStartedAt.ifPresent(startedAt -> properties.setProperty("sessionStartedAt", startedAt.toString()));
-		// Atomic: a half-written record reads as no record, and Play would then replace the Local Copy.
-		AtomicFile.write(worldFolder.resolve(FILE_NAME),
-				out -> properties.store(out, "World GDrive Sync: what this Local Copy came from"));
+		synchronized (LocalCopyRecord.class) {
+			// Atomic: a half-written record reads as no record, and Play would then replace the Local Copy.
+			AtomicFile.write(worldFolder.resolve(FILE_NAME),
+					out -> properties.store(out, "World GDrive Sync: what this Local Copy came from"));
+		}
 	}
 }
