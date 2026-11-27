@@ -22,6 +22,10 @@ _Avoid_: Version, generation
 A player's own unzipped copy of the Shared World, kept apart from their ordinary singleplayer worlds.
 _Avoid_: Local save, cache
 
+**Local-only Data**:
+Files in a Local Copy that are never uploaded, and that stay in the Local Copy when a newer Current Save replaces it. Today that is Distant Horizons' LOD cache (`DistantHorizons.sqlite` and its journal files), which each player's game rebuilds from the world's chunks.
+_Avoid_: Cache, ignored files
+
 **Pending Upload**:
 A Local Copy that was supposed to become the new Current Save but hasn't been uploaded yet, usually because the upload failed. The Host keeps the Lock until it succeeds.
 
