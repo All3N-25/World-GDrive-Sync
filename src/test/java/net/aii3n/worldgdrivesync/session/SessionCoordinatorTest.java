@@ -878,7 +878,7 @@ class SessionCoordinatorTest {
 		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
 		LocalCopy before = coordinator().localCopy(shared.id()).orElseThrow();
 		AtomicBoolean failed = new AtomicBoolean();
-		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS, (from, to) -> {
+		SessionCoordinator alice = coordinatorMovingWith((from, to) -> {
 			// Only the first move into place, which is the new copy's; putting the old one back works.
 			if (to.equals(before.folder()) && failed.compareAndSet(false, true)) throw new AccessDeniedException(to.toString());
 			Files.move(from, to);
@@ -899,16 +899,51 @@ class SessionCoordinatorTest {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
 		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
-		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS, (from, to) -> {
+		SessionCoordinator alice = coordinatorMovingWith((from, to) -> {
 			if (to.equals(folder)) throw new AccessDeniedException(to.toString());
 			Files.move(from, to);
 		});
 
 		assertThrows(AccessDeniedException.class, () -> alice.play(shared.id(), ProgressListener.NONE));
 
-		try (Stream<Path> left = Files.walk(sharedsaves)) {
-			Path kept = left.filter(file -> file.endsWith("region/r.0.0.mca")).findFirst().orElseThrow();
-			assertEquals("chunks", Files.readString(kept));
+		assertEquals("chunks", Files.readString(chunksKeptInSharedsaves()));
+	}
+
+	@Test
+	void ifSomethingElseTakesTheLocalCopysPlaceDuringAFailedSwapTheOldOneIsStillKept(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
+		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		AtomicBoolean failed = new AtomicBoolean();
+		SessionCoordinator alice = coordinatorMovingWith((from, to) -> {
+			if (to.equals(folder) && failed.compareAndSet(false, true)) {
+				write(folder.resolve("stray.txt"), "written by another program");
+				throw new AccessDeniedException(to.toString());
+			}
+			Files.move(from, to);
+		});
+
+		assertThrows(AccessDeniedException.class, () -> alice.play(shared.id(), ProgressListener.NONE));
+
+		assertEquals("chunks", Files.readString(chunksKeptInSharedsaves()));
+	}
+
+	@Test
+	void ifTheOldLocalCopyCannotBeMovedAsideItStaysAsItWas(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
+		LocalCopy before = coordinator().localCopy(shared.id()).orElseThrow();
+		SessionCoordinator alice = coordinatorMovingWith((from, to) -> {
+			if (from.equals(before.folder())) throw new AccessDeniedException(from.toString());
+			Files.move(from, to);
+		});
+
+		assertThrows(AccessDeniedException.class, () -> alice.play(shared.id(), ProgressListener.NONE));
+
+		assertEquals(Optional.of(before), alice.localCopy(shared.id()));
+		assertEquals("chunks", Files.readString(before.folder().resolve("region/r.0.0.mca")));
+		try (Stream<Path> left = Files.list(sharedsaves)) {
+			assertEquals(List.of(before.folder()), left.toList(), "no leftovers");
 		}
 	}
 
@@ -1315,6 +1350,16 @@ class SessionCoordinatorTest {
 
 		assertEquals("Alice", assertInstanceOf(RestoreResult.Refused.class, result).heldBy().hostName());
 		assertEquals(2, cloud.metadata(shared.id()).revision());
+	}
+
+	private SessionCoordinator coordinatorMovingWith(SessionCoordinator.FolderMover mover) {
+		return new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS, mover);
+	}
+
+	private Path chunksKeptInSharedsaves() throws IOException {
+		try (Stream<Path> files = Files.walk(sharedsaves)) {
+			return files.filter(file -> file.endsWith("region/r.0.0.mca")).findFirst().orElseThrow();
+		}
 	}
 
 	/** Plays a whole session as {@code player}: Play, change the world, an hour later save and quit. */

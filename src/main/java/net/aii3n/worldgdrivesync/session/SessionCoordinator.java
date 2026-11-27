@@ -688,6 +688,7 @@ public final class SessionCoordinator {
 	private void swapIn(Path newCopy, Path folder) throws IOException {
 		Path aside = Files.createTempDirectory(localCopies, STAGING_PREFIX);
 		Path old = aside.resolve("old");
+		boolean swapped = false;
 		try {
 			synchronized (LocalCopyRecord.class) { // not while a listing reads the old record
 				boolean replacing = Files.exists(folder);
@@ -698,10 +699,11 @@ public final class SessionCoordinator {
 					if (replacing) putBack(old, folder, e);
 					throw e;
 				}
+				swapped = true;
 			}
 		} finally {
-			// After a failed putBack, this holds the only old copy.
-			if (!Files.exists(old) || Files.exists(folder)) deleteLeftover(aside);
+			// After a failed swap, anything still in there is the only old copy.
+			if (swapped || Files.notExists(old)) deleteLeftover(aside);
 		}
 	}
 
