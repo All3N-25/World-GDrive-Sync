@@ -15,8 +15,9 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Adds the Shared Worlds button to the title screen. It takes the right half of the Realms row
- * (Realms shrinks to the left half, like Options/Quit), so nothing else has to move.
+ * Adds the Shared Worlds button to the title screen. It takes the left half of the Realms row and
+ * Realms shrinks to the right half (like Options/Quit), so nothing else has to move. Realms keeps
+ * the row's right edge because vanilla draws its notification icons there at fixed coordinates.
  */
 final class TitleScreenButton {
 	private static final int GAP = 4;
@@ -37,9 +38,12 @@ final class TitleScreenButton {
 		Optional<AbstractWidget> realms = find(widgets, "menu.online");
 		if (realms.isPresent()) {
 			AbstractWidget row = realms.get();
+			int rowLeft = row.getX();
+			int rowRight = row.getRight();
 			int half = (row.getWidth() - GAP) / 2;
 			row.setWidth(half);
-			widgets.add(button.bounds(row.getX() + half + GAP, row.getY(), half, row.getHeight()).build());
+			row.setX(rowRight - half);
+			widgets.add(button.bounds(rowLeft, row.getY(), half, row.getHeight()).build());
 			return;
 		}
 		// No Realms row (e.g. demo mode or another mod rearranged the menu): sit beside Singleplayer.
