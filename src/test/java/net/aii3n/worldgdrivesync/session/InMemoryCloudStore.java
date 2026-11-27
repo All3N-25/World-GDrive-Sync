@@ -31,6 +31,7 @@ final class InMemoryCloudStore implements CloudStore {
 	private boolean failMetadataReads;
 	private boolean failLockReads;
 	private boolean failLockDeletes;
+	private boolean failLockWrites;
 	private boolean dropConnectionAfterNextReplace;
 	private final Map<Call, Hook> hooks = new EnumMap<>(Call.class);
 
@@ -59,6 +60,7 @@ final class InMemoryCloudStore implements CloudStore {
 		byte[] currentSave;
 		final Map<String, Lock> locks = new LinkedHashMap<>();
 		final Map<String, StoredBackup> backups = new LinkedHashMap<>();
+		final List<CurrentSave> history = new ArrayList<>();
 
 		Folder(String name) {
 			this.name = name;
@@ -66,6 +68,29 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	private record StoredBackup(Backup backup, byte[] zip) {
+	}
+
+	/** How a zip became the Current Save. */
+	enum Change {
+		/** The first upload, when the world was shared. */
+		SHARED,
+		/** An upload replacing the previous Current Save. */
+		REPLACED,
+		/** A Backup restored. */
+		RESTORED
+	}
+
+	/**
+	 * One Current Save the world has had, as {@link #currentSaveHistory} lists it.
+	 *
+	 * @param entries     the zip's files and their contents, by path inside the zip
+	 * @param lockHolderIds the {@link Player#id()}s of the players holding a Lock at the moment it became current
+	 */
+	record CurrentSave(Change change, int revision, Map<String, String> entries, List<String> lockHolderIds) {
+	}
+
+	private static void recordCurrentSave(Folder folder, Change change) {
+		folder.history.add(new CurrentSave(change, folder.metadata.revision(), entries(folder.currentSave), List.copyOf(folder.locks.keySet())));
 	}
 
 	// --- CloudStore ---
@@ -95,6 +120,7 @@ final class InMemoryCloudStore implements CloudStore {
 		Folder folder = folder(worldId);
 		folder.currentSave = send(zip, bytesSent);
 		folder.metadata = metadata;
+		recordCurrentSave(folder, Change.SHARED);
 	}
 
 	@Override
@@ -107,6 +133,7 @@ final class InMemoryCloudStore implements CloudStore {
 		folder.backups.put(backup.id(), new StoredBackup(backup, folder.currentSave));
 		folder.currentSave = bytes;
 		folder.metadata = next;
+		recordCurrentSave(folder, Change.REPLACED);
 		if (dropConnectionAfterNextReplace) {
 			dropConnectionAfterNextReplace = false;
 			throw new IOException("Connection dropped before the answer arrived (simulated)");
@@ -139,6 +166,7 @@ final class InMemoryCloudStore implements CloudStore {
 		folder.backups.put(backup.id(), new StoredBackup(backup, folder.currentSave));
 		folder.currentSave = chosen.zip();
 		folder.metadata = next;
+		recordCurrentSave(folder, Change.RESTORED);
 		return backup;
 	}
 
@@ -181,12 +209,14 @@ final class InMemoryCloudStore implements CloudStore {
 	@Override
 	public synchronized void writeLock(String worldId, Lock lock) throws IOException {
 		runHook(Call.LOCK_WRITE);
+		if (failLockWrites) throw new IOException("Network down (simulated)");
 		folder(worldId).locks.put(lock.hostId(), lock);
 	}
 
 	@Override
 	public synchronized boolean refreshLock(String worldId, Lock lock) throws IOException {
 		runHook(Call.LOCK_WRITE);
+		if (failLockWrites) throw new IOException("Network down (simulated)");
 		Map<String, Lock> locks = folder(worldId).locks;
 		if (!locks.containsKey(lock.hostId())) return false;
 		locks.put(lock.hostId(), lock);
@@ -254,6 +284,21 @@ final class InMemoryCloudStore implements CloudStore {
 		failLockDeletes = false;
 	}
 
+	/** From now on writing or refreshing a Lock fails, like a dropped connection. */
+	void failLockWrites() {
+		failLockWrites = true;
+	}
+
+	/** The connection is back: Lock writes succeed again after {@link #failLockWrites}. */
+	void lockWritesWork() {
+		failLockWrites = false;
+	}
+
+	/** The connection is back: Backup deletes succeed again after {@link #failBackupDeletes}. */
+	void backupDeletesWork() {
+		failBackupDeletes = false;
+	}
+
 	/** From now on every download fails partway, like a dropped connection. */
 	void failDownloads() {
 		failDownloads = true;
@@ -292,6 +337,11 @@ final class InMemoryCloudStore implements CloudStore {
 
 	synchronized WorldMetadata metadata(String worldId) {
 		return worlds.get(worldId).metadata;
+	}
+
+	/** Every Current Save the world has had, oldest first, the present one last. */
+	synchronized List<CurrentSave> currentSaveHistory(String worldId) {
+		return List.copyOf(worlds.get(worldId).history);
 	}
 
 	/** The Current Save zip's files and their contents, by path inside the zip. */

@@ -44,6 +44,8 @@ dependencies {
 
 test {
 	useJUnitPlatform()
+	// -Dwgds.interleavings.seed/runs/actions reach SessionCoordinatorInterleavingTest.
+	systemProperties providers.systemPropertiesPrefixedBy("wgds.").get()
 	testLogging {
 		events "passed", "skipped", "failed"
 		// Show which test failed and why even under -q, without digging through build/test-results.
