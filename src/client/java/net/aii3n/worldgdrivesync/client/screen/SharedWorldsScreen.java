@@ -27,12 +27,11 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
-import java.util.function.LongSupplier;
 
 /**
  * Lists every Shared World on the account with its status. Reads Drive each time the screen is
- * opened (or returned to), when Refresh is pressed, and when the launch retry of a Pending Upload
- * ends. A world that retry is still working on shows its progress and can't be played.
+ * opened (or returned to), when Refresh is pressed, when the launch retry of a Pending Upload ends,
+ * and when a Lock given up after backing out of Play has been dealt with. A world that retry is still working on shows its progress and can't be played.
  */
 public class SharedWorldsScreen extends Screen {
 	private static final Component TITLE = Component.translatable("world-gdrive-sync.sharedWorlds.title");
@@ -51,9 +50,9 @@ public class SharedWorldsScreen extends Screen {
 	private @Nullable String loadError;
 	private int loadRequest;
 	/** {@link LaunchRetry#endedCount} when the latest list was asked for. */
-	private long listRequestedAt;
-	/** {@link #listRequestedAt} of the list on screen. */
-	private long listedAt;
+	private long endedCountAtRequest;
+	/** {@link LaunchRetry#endedCount} when the list on screen was asked for. */
+	private long endedCountOfList;
 
 	public SharedWorldsScreen(Screen lastScreen) {
 		super(TITLE);
@@ -66,7 +65,8 @@ public class SharedWorldsScreen extends Screen {
 		refresh();
 	}
 
-	private void refresh() {
+	/** Clears the list and reads it again. */
+	public void refresh() {
 		if (!GoogleConnection.get().account().isConnected()) return;
 		worlds = null;
 		loadError = null;
@@ -77,15 +77,15 @@ public class SharedWorldsScreen extends Screen {
 	/** Reads the list again, leaving what is on screen until the answer arrives. */
 	private void load() {
 		int request = ++loadRequest;
-		long requestedAt = SharedWorlds.get().launchRetry().endedCount();
-		listRequestedAt = requestedAt;
+		long endedCount = SharedWorlds.get().launchRetry().endedCount();
+		endedCountAtRequest = endedCount;
 		SharedWorlds.get().listSharedWorlds().whenCompleteAsync((result, error) -> {
 			if (request != loadRequest) return;
 			if (error != null) {
 				loadError = SharedWorlds.describe(error);
 			} else {
 				loadError = null;
-				listedAt = requestedAt;
+				endedCountOfList = endedCount;
 				worlds = result.stream().sorted(Comparator.comparing(SharedWorld::name, String.CASE_INSENSITIVE_ORDER)).toList();
 			}
 			rebuildWidgets();
@@ -115,7 +115,7 @@ public class SharedWorldsScreen extends Screen {
 			layout.addToContents(text(Component.translatable("world-gdrive-sync.sharedWorlds.empty")));
 		} else {
 			list = layout.addToContents(new WorldList(minecraft, width, layout.getContentHeight(), layout.getHeaderHeight(), worlds,
-					this::play, () -> listedAt));
+					this::play, endedCountOfList));
 			list.select(selectedId);
 		}
 
@@ -169,7 +169,7 @@ public class SharedWorldsScreen extends Screen {
 	}
 
 	private boolean blocksPlay(SharedWorld world) {
-		return SharedWorlds.get().launchRetry().blocksPlay(world.id(), listedAt);
+		return SharedWorlds.get().launchRetry().blocksPlay(world.id(), endedCountOfList);
 	}
 
 	private void updateBackupsButton() {
@@ -200,7 +200,7 @@ public class SharedWorldsScreen extends Screen {
 	@Override
 	public void tick() {
 		// A launch retry ended: read how that world stands now.
-		if (shownConnected && SharedWorlds.get().launchRetry().endedCount() != listRequestedAt) load();
+		if (shownConnected && SharedWorlds.get().launchRetry().endedCount() != endedCountAtRequest) load();
 		updatePlayButton();
 		updateBackupsButton();
 		// Connecting or disconnecting happens elsewhere (settings, or a revoked sign-in found mid-call).
@@ -247,9 +247,9 @@ public class SharedWorldsScreen extends Screen {
 
 	private static final class WorldList extends ObjectSelectionList<WorldList.Entry> {
 		WorldList(Minecraft minecraft, int width, int height, int y, List<SharedWorld> worlds, Consumer<SharedWorld> play,
-				LongSupplier listedAt) {
+				long endedCountOfList) {
 			super(minecraft, width, height, y, 36);
-			for (SharedWorld world : worlds) addEntry(new Entry(minecraft, world, play, listedAt));
+			for (SharedWorld world : worlds) addEntry(new Entry(minecraft, world, play, endedCountOfList));
 		}
 
 		/** Selects the world with this id, if it is listed. */
@@ -266,13 +266,13 @@ public class SharedWorldsScreen extends Screen {
 			private final Minecraft minecraft;
 			private final SharedWorld world;
 			private final Consumer<SharedWorld> play;
-			private final LongSupplier listedAt;
+			private final long endedCountOfList;
 
-			Entry(Minecraft minecraft, SharedWorld world, Consumer<SharedWorld> play, LongSupplier listedAt) {
+			Entry(Minecraft minecraft, SharedWorld world, Consumer<SharedWorld> play, long endedCountOfList) {
 				this.minecraft = minecraft;
 				this.world = world;
 				this.play = play;
-				this.listedAt = listedAt;
+				this.endedCountOfList = endedCountOfList;
 			}
 
 			@Override
@@ -292,8 +292,9 @@ public class SharedWorldsScreen extends Screen {
 				int y = getContentY() + 1;
 				graphics.text(minecraft.font, world.name(), x, y, CommonColors.WHITE, false);
 				// The list is older than the end of this world's retry: its Revision and status are out of date.
-				boolean outOfDate = SharedWorlds.get().launchRetry().endedSince(world.id(), listedAt.getAsLong());
+				// State first: see LaunchRetry.end.
 				Optional<LaunchRetry.State> retry = SharedWorlds.get().launchRetry().state(world.id());
+				boolean outOfDate = SharedWorlds.get().launchRetry().endedSince(world.id(), endedCountOfList);
 				graphics.text(minecraft.font, Component.translatable("world-gdrive-sync.sharedWorlds.revision", world.revision())
 						.append(" · ").append(statusText(world.status())), x, y + 12, CommonColors.LIGHT_GRAY, false);
 				Component upload = retry.map(Entry::retryText).orElseGet(() -> {
@@ -310,6 +311,8 @@ public class SharedWorldsScreen extends Screen {
 					case LaunchRetry.State.Waiting waiting -> Component.translatable("world-gdrive-sync.sharedWorlds.retryWaiting");
 					case LaunchRetry.State.Uploading uploading ->
 							Component.translatable("world-gdrive-sync.sharedWorlds.retryUploading", uploading.percent());
+					case LaunchRetry.State.Downloading downloading ->
+							Component.translatable("world-gdrive-sync.sharedWorlds.retryDownloading");
 				}).withStyle(ChatFormatting.YELLOW);
 			}
 		}

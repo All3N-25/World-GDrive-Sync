@@ -33,14 +33,14 @@ public final class CoordinatorRunner {
 		return supply(SessionCoordinator::listSharedWorlds, listing);
 	}
 
-	private <T> CompletableFuture<T> supply(CoordinatorTask<T> task, ExecutorService thread) {
+	private <T> CompletableFuture<T> supply(CoordinatorTask<T> task, ExecutorService executor) {
 		return CompletableFuture.supplyAsync(() -> {
 			try {
 				return task.call(coordinator.get());
 			} catch (Exception e) {
 				throw new CompletionException(e);
 			}
-		}, thread);
+		}, executor);
 	}
 
 	private static ThreadFactory daemon(String name) {

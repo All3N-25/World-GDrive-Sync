@@ -25,8 +25,8 @@ import java.util.Properties;
  *
  * <p>Listing Shared Worlds reads records while an upload or download replaces them on another
  * thread. {@link #read} and {@link #write} take turns on this class's monitor, because Windows
- * refuses to rename over, or delete the folder of, a file that is open. Take it too before deleting
- * or moving a Local Copy's folder.
+ * refuses to rename over, or delete the folder of, a file that is open. Take it too before
+ * replacing an existing Local Copy's folder.
  */
 record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> sessionStartedAt) {
 	static final String FILE_NAME = "world-gdrive-sync.properties";

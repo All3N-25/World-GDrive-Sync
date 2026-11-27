@@ -39,19 +39,21 @@ public final class HostingSession {
 		STATE.opened(worldId, localCopy.folder());
 		SharedWorldLauncher.open(minecraft, localCopy, () -> {
 			STATE.cancelled(worldId);
-			leaveWithoutPlaying(worldId);
 			minecraft.gui.setScreen(onCancel);
+			leaveWithoutPlaying(worldId);
 		});
 	}
 
 	private static void leaveWithoutPlaying(String worldId) {
+		Minecraft minecraft = Minecraft.getInstance();
 		SharedWorlds.get().run(coordinator -> {
 			coordinator.leaveWithoutPlaying(worldId);
 			return null;
-		}).exceptionally(e -> {
-			WorldGDriveSync.LOGGER.warn("Couldn't release the Lock on {}", worldId, e);
-			return null;
-		});
+		}).whenCompleteAsync((result, e) -> {
+			if (e != null) WorldGDriveSync.LOGGER.warn("Couldn't release the Lock on {}", worldId, e);
+			// Listing doesn't wait for this release, so a list already read may predate it.
+			if (minecraft.gui.screen() instanceof SharedWorldsScreen screen) screen.refresh();
+		}, minecraft);
 	}
 
 	// Any thread: what the game has to do is handed to the client thread.

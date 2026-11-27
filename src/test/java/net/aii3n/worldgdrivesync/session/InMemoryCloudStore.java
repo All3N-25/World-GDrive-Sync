@@ -56,6 +56,9 @@ final class InMemoryCloudStore implements CloudStore {
 	private Runnable afterChunkSent = () -> {
 	};
 
+	private Runnable afterChunkReceived = () -> {
+	};
+
 	private static final class Folder {
 		final String name;
 		WorldMetadata metadata;
@@ -204,6 +207,7 @@ final class InMemoryCloudStore implements CloudStore {
 			received = Math.min(bytes.length, received + CHUNK);
 			if (failDownloads) throw new IOException("Network down (simulated)");
 			progress.onProgress(received, bytes.length);
+			afterChunkReceived.run();
 		}
 		Files.write(zip, bytes);
 	}
@@ -255,6 +259,11 @@ final class InMemoryCloudStore implements CloudStore {
 	/** Runs {@code watcher} each time an upload has reported another chunk as sent. */
 	synchronized void afterEachChunkSent(Runnable watcher) {
 		afterChunkSent = watcher;
+	}
+
+	/** Runs {@code watcher} each time a download has reported another chunk as received. */
+	synchronized void afterEachChunkReceived(Runnable watcher) {
+		afterChunkReceived = watcher;
 	}
 
 	/** The connection is back: uploads succeed again after {@link #failUploads}. */

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +26,7 @@ class LaunchRetryTest {
 	Path sharedsaves;
 
 	InMemoryCloudStore cloud;
+	final TestClock clock = new TestClock(Instant.parse("2026-11-24T18:00:00Z"));
 	SessionCoordinator coordinator;
 	final LaunchRetry retry = new LaunchRetry();
 	final List<String> reports = new ArrayList<>();
@@ -32,7 +34,7 @@ class LaunchRetryTest {
 	@BeforeEach
 	void setUp() throws IOException {
 		cloud = new InMemoryCloudStore();
-		coordinator = new SessionCoordinator(cloud, new TestClock(Instant.parse("2026-11-24T18:00:00Z")),
+		coordinator = new SessionCoordinator(cloud, clock,
 				sharedsaves, new Player("uuid-alice", "Alice"));
 		Files.writeString(saves.resolve("level.dat"), "level data");
 	}
@@ -80,6 +82,23 @@ class LaunchRetryTest {
 		assertFalse(retry.endedSince(worldId, retry.endedCount()));
 		assertEquals(List.of("started " + worldId + " at Uploading[percent=0]", "succeeded " + worldId), reports);
 		assertEquals(2, coordinator.listSharedWorlds().getFirst().revision());
+	}
+
+	@Test
+	void keepingAnUnmergedBackupShowsTheDownloadOfTheNewerRevisionThatFollows(@TempDir Path bobsSharedsaves) throws Exception {
+		String worldId = crashedSession("Survival");
+		SessionCoordinator bob = new SessionCoordinator(cloud, clock, bobsSharedsaves, new Player("uuid-bob", "Bob"));
+		clock.advance(Duration.ofMinutes(10));
+		bob.takeOver(worldId, ProgressListener.NONE);
+		bob.quit(worldId, ProgressListener.NONE);
+		List<Optional<LaunchRetry.State>> seen = new ArrayList<>();
+		cloud.afterEachChunkReceived(() -> seen.add(retry.state(worldId)));
+
+		retry.run(coordinator, report);
+
+		assertEquals(Optional.of(new LaunchRetry.State.Downloading()), seen.getFirst());
+		assertEquals(Optional.of(new LaunchRetry.State.Downloading()), seen.getLast());
+		assertEquals(Optional.empty(), retry.state(worldId));
 	}
 
 	@Test

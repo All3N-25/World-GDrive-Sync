@@ -25,6 +25,13 @@ public final class LaunchRetry {
 		 */
 		record Uploading(int percent) implements State {
 		}
+
+		/**
+		 * Someone uploaded a newer Revision, so this world's Pending Upload is now an Unmerged Backup
+		 * and that Revision is being downloaded in its place.
+		 */
+		record Downloading() implements State {
+		}
 	}
 
 	/** Told about each world's retry, on the thread that runs it. */
@@ -63,8 +70,13 @@ public final class LaunchRetry {
 		report.started(worldId);
 		try {
 			RetryResult result = coordinator.retryPendingUpload(worldId, (step, done, total) -> {
-				if (step == ProgressListener.Step.UPLOADING && total > 0) {
-					states.put(worldId, new State.Uploading((int) Math.min(100, done * 100 / total)));
+				switch (step) {
+					case ZIPPING -> {
+					}
+					case UPLOADING -> {
+						if (total > 0) states.put(worldId, new State.Uploading((int) Math.min(100, done * 100 / total)));
+					}
+					case DOWNLOADING, UNZIPPING -> states.put(worldId, new State.Downloading());
 				}
 			});
 			report.succeeded(worldId, result);
