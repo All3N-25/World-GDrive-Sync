@@ -3,12 +3,16 @@ package net.aii3n.worldgdrivesync.session;
 import net.aii3n.worldgdrivesync.settings.Settings;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -16,7 +20,9 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import net.aii3n.worldgdrivesync.settings.Settings;
 
@@ -864,6 +870,70 @@ class SessionCoordinatorTest {
 		assertEquals(alicesCopy.folder(), updated.folder());
 		assertEquals("chunks with Bob's farm", Files.readString(updated.folder().resolve("region/r.0.0.mca")));
 		assertEquals(Optional.of(updated), coordinator().localCopy(shared.id()));
+	}
+
+	@Test
+	void ifTheNewRevisionCannotBeMovedInTheOldLocalCopyIsPutBack(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
+		LocalCopy before = coordinator().localCopy(shared.id()).orElseThrow();
+		AtomicBoolean failed = new AtomicBoolean();
+		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS, (from, to) -> {
+			// Only the first move into place, which is the new copy's; putting the old one back works.
+			if (to.equals(before.folder()) && failed.compareAndSet(false, true)) throw new AccessDeniedException(to.toString());
+			Files.move(from, to);
+		});
+
+		assertThrows(AccessDeniedException.class, () -> alice.play(shared.id(), ProgressListener.NONE));
+
+		assertEquals(Optional.of(before), alice.localCopy(shared.id()));
+		assertEquals("chunks", Files.readString(before.folder().resolve("region/r.0.0.mca")));
+		assertEquals(WorldStatus.FREE, alice.listSharedWorlds().getFirst().status());
+		try (Stream<Path> left = Files.list(sharedsaves)) {
+			assertEquals(List.of(before.folder()), left.toList(), "no leftovers");
+		}
+	}
+
+	@Test
+	void ifTheOldLocalCopyCannotBePutBackEitherItIsKeptOnDisk(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
+		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		SessionCoordinator alice = new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS, (from, to) -> {
+			if (to.equals(folder)) throw new AccessDeniedException(to.toString());
+			Files.move(from, to);
+		});
+
+		assertThrows(AccessDeniedException.class, () -> alice.play(shared.id(), ProgressListener.NONE));
+
+		try (Stream<Path> left = Files.walk(sharedsaves)) {
+			Path kept = left.filter(file -> file.endsWith("region/r.0.0.mca")).findFirst().orElseThrow();
+			assertEquals("chunks", Files.readString(kept));
+		}
+	}
+
+	/** On Windows the delete fails when a file is still open; here, a read-only folder makes it fail. */
+	@Test
+	@DisabledOnOs(OS.WINDOWS)
+	void playStillOpensTheNewerRevisionWhenTheOldLocalCopyCannotBeDeleted(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
+		Path oldRegion = coordinator().localCopy(shared.id()).orElseThrow().folder().resolve("region");
+		Files.setPosixFilePermissions(oldRegion, PosixFilePermissions.fromString("r-xr-xr-x"));
+		try {
+			PlayResult result = coordinator().play(shared.id(), ProgressListener.NONE);
+
+			LocalCopy updated = assertInstanceOf(PlayResult.Ready.class, result).localCopy();
+			assertEquals(2, updated.revision());
+			assertEquals("chunks with Bob's farm", Files.readString(updated.folder().resolve("region/r.0.0.mca")));
+		} finally {
+			// Wherever the old copy ended up, let @TempDir delete it.
+			try (Stream<Path> walk = Files.walk(sharedsaves)) {
+				for (Path folder : walk.filter(Files::isDirectory).toList()) {
+					Files.setPosixFilePermissions(folder, PosixFilePermissions.fromString("rwxr-xr-x"));
+				}
+			}
+		}
 	}
 
 	@Test

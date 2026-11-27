@@ -2,6 +2,7 @@ package net.aii3n.worldgdrivesync.session;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -38,6 +39,7 @@ public final class SessionCoordinator {
 	private final Path localCopies;
 	private final Player me;
 	private final Supplier<Settings> settings;
+	private final FolderMover mover;
 	/** The worlds this player took the Lock on through this coordinator and hasn't released. */
 	private final Set<String> heldLocks = ConcurrentHashMap.newKeySet();
 	/**
@@ -61,11 +63,23 @@ public final class SessionCoordinator {
 	 * @param settings    the player's current settings, read each time one is needed
 	 */
 	public SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me, Supplier<Settings> settings) {
+		this(cloud, clock, localCopies, me, settings, Files::move);
+	}
+
+	/** As the public constructor, with {@code mover} swapping Local Copies, so a test can make a swap fail. */
+	SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me, Supplier<Settings> settings, FolderMover mover) {
 		this.cloud = cloud;
 		this.clock = clock;
 		this.localCopies = localCopies;
 		this.me = me;
 		this.settings = settings;
+		this.mover = mover;
+	}
+
+	/** Renames a folder to a path where nothing exists. */
+	@FunctionalInterface
+	interface FolderMover {
+		void move(Path from, Path to) throws IOException;
 	}
 
 	/**
@@ -335,11 +349,7 @@ public final class SessionCoordinator {
 			cloud.downloadCurrentSave(worldId, zip, (done, total) -> progress.onProgress(ProgressListener.Step.DOWNLOADING, done, total));
 			WorldZip.unzip(zip, staging, progress);
 			new LocalCopyRecord(current.revision()).write(staging);
-			Path folder = localCopies.resolve(worldId);
-			synchronized (LocalCopyRecord.class) { // not while a listing reads the old record
-				deleteRecursively(folder);
-				Files.move(staging, folder);
-			}
+			swapIn(staging, localCopies.resolve(worldId));
 		} finally {
 			Files.deleteIfExists(zip);
 			deleteRecursively(staging);
@@ -668,6 +678,49 @@ public final class SessionCoordinator {
 
 	private static SharedWorld sharedWorld(CloudWorld world, WorldMetadata metadata, WorldStatus status, boolean pendingUpload) {
 		return new SharedWorld(world.id(), world.name(), metadata.revision(), metadata.savedAt(), status, pendingUpload);
+	}
+
+	/**
+	 * Puts {@code newCopy} where the Local Copy at {@code folder} is. The old one is moved aside
+	 * first, put back if the new one can't be moved in, and deleted only once the new one is in
+	 * place, so a failure never loses it.
+	 */
+	private void swapIn(Path newCopy, Path folder) throws IOException {
+		Path aside = Files.createTempDirectory(localCopies, STAGING_PREFIX);
+		Path old = aside.resolve("old");
+		try {
+			synchronized (LocalCopyRecord.class) { // not while a listing reads the old record
+				boolean replacing = Files.exists(folder);
+				if (replacing) mover.move(folder, old);
+				try {
+					mover.move(newCopy, folder);
+				} catch (IOException | RuntimeException e) {
+					if (replacing) putBack(old, folder, e);
+					throw e;
+				}
+			}
+		} finally {
+			// After a failed putBack, this holds the only old copy.
+			if (!Files.exists(old) || Files.exists(folder)) deleteLeftover(aside);
+		}
+	}
+
+	private void putBack(Path old, Path folder, Exception failure) {
+		try {
+			mover.move(old, folder);
+		} catch (IOException e) {
+			LOGGER.log(System.Logger.Level.ERROR, "Couldn't put the Local Copy back; it is in " + old, e);
+			failure.addSuppressed(e);
+		}
+	}
+
+	/** Best effort: nothing depends on it, so a failure only leaves a folder behind. */
+	private static void deleteLeftover(Path folder) {
+		try {
+			deleteRecursively(folder);
+		} catch (IOException | UncheckedIOException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + folder, e);
+		}
 	}
 
 	private static void deleteRecursively(Path folder) throws IOException {
