@@ -15,6 +15,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,6 +39,8 @@ final class DriveHttp {
 	private static final int ATTEMPTS = 4;
 
 	private final GoogleAccount account;
+	private final String uploadApi;
+	private final Pause pause;
 	private final HttpClient http = HttpClient.newBuilder()
 			.connectTimeout(Duration.ofSeconds(20))
 			// NEVER: resumable uploads answer 308 "Resume Incomplete" with no Location header.
@@ -47,7 +50,19 @@ final class DriveHttp {
 			.build();
 
 	DriveHttp(GoogleAccount account) {
+		this(account, UPLOAD_API, Thread::sleep);
+	}
+
+	/** As above, with where uploads go and how a back-off waits: a fake Drive and no waiting in tests. */
+	DriveHttp(GoogleAccount account, String uploadApi, Pause pause) {
 		this.account = account;
+		this.uploadApi = uploadApi;
+		this.pause = pause;
+	}
+
+	/** How a back-off waits. */
+	interface Pause {
+		void sleep(long millis) throws InterruptedException;
 	}
 
 	/** GETs {@code url} (under {@link #API}) and parses the JSON answer. */
@@ -80,7 +95,7 @@ final class DriveHttp {
 
 	/** Replaces a small file's content, by file id: a file deleted meanwhile is a FileNotFoundException, never re-created. */
 	void replaceContent(String fileId, String contentType, byte[] content) throws IOException {
-		send(token -> authorized(UPLOAD_API + "/files/" + fileId + "?uploadType=media&fields=id", token)
+		send(token -> authorized(uploadApi + "/files/" + fileId + "?uploadType=media&fields=id", token)
 				.header("Content-Type", contentType)
 				.method("PATCH", HttpRequest.BodyPublishers.ofByteArray(content)));
 	}
@@ -94,7 +109,7 @@ final class DriveHttp {
 		body.writeBytes(content);
 		body.writeBytes(("\r\n--" + boundary + "--").getBytes(StandardCharsets.UTF_8));
 		byte[] bytes = body.toByteArray();
-		send(token -> authorized(UPLOAD_API + "/files?uploadType=multipart&fields=id", token)
+		send(token -> authorized(uploadApi + "/files?uploadType=multipart&fields=id", token)
 				.header("Content-Type", "multipart/related; boundary=" + boundary)
 				.POST(HttpRequest.BodyPublishers.ofByteArray(bytes)));
 	}
@@ -107,7 +122,7 @@ final class DriveHttp {
 	 */
 	JsonObject uploadNewFile(JsonObject metadata, Path zip, LongConsumer bytesSent) throws IOException {
 		long size = Files.size(zip);
-		HttpResponse<byte[]> started = send(token -> authorized(UPLOAD_API + "/files?uploadType=resumable&fields=id", token)
+		HttpResponse<byte[]> started = send(token -> authorized(uploadApi + "/files?uploadType=resumable&fields=id", token)
 				.header("Content-Type", "application/json; charset=UTF-8")
 				.header("X-Upload-Content-Type", "application/zip")
 				.header("X-Upload-Content-Length", Long.toString(size))
@@ -176,8 +191,6 @@ final class DriveHttp {
 		private final Path zip;
 		private final long size;
 		private final LongConsumer bytesSent;
-		/** Drive's answer once a status check finds the upload already complete. */
-		private JsonObject finished;
 
 		ResumableUpload(URI session, Path zip, long size, LongConsumer bytesSent) {
 			this.session = session;
@@ -186,32 +199,31 @@ final class DriveHttp {
 			this.bytesSent = bytesSent;
 		}
 
-		/** Sends the whole zip; returns Drive's JSON for the stored file. */
+		/**
+		 * Sends the whole zip; returns Drive's JSON for the stored file. Gives up after {@link
+		 * #ATTEMPTS} failures with no new bytes stored in between. A failure is a request that fails or
+		 * is turned away for now, or a 308 showing nothing new (except the status check's answer right
+		 * after a failure).
+		 */
 		JsonObject run() throws IOException {
 			long offset = 0;
+			/* The most Drive has ever reported stored: only going past it is progress. */
+			long furthest = 0;
 			int failures = 0;
+			// After a failed request, ask Drive what it has before sending any more.
+			boolean recovering = false;
 			try (var channel = Files.newByteChannel(zip)) {
 				while (true) {
-					if (size > 0 && offset >= size) {
-						// A status check found everything already stored.
-						bytesSent.accept(size);
-						return finished;
-					}
-					int length = (int) Math.min(CHUNK, size - offset);
-					byte[] chunk = new byte[length];
-					channel.position(offset);
-					ByteBuffer buffer = ByteBuffer.wrap(chunk);
-					while (buffer.hasRemaining() && channel.read(buffer) >= 0) {
-						// keep reading
-					}
-					String range = size == 0 ? "bytes */0" : "bytes " + offset + "-" + (offset + length - 1) + "/" + size;
+					// With every byte stored, only Drive's answer for the finished file is still missing.
+					boolean statusCheck = recovering || (size > 0 && offset >= size);
+					String range = statusCheck ? "bytes */" + size : chunkRange(offset);
+					byte[] body = statusCheck ? new byte[0] : chunk(channel, offset);
 					HttpResponse<byte[]> response;
 					try {
-						response = put(range, chunk);
+						response = put(range, body);
 					} catch (IOException e) {
-						if (++failures >= ATTEMPTS) throw e;
-						backOff(failures);
-						offset = committedOffset();
+						backOffOrGiveUp(++failures, e);
+						recovering = true;
 						continue;
 					}
 					int status = response.statusCode();
@@ -221,19 +233,48 @@ final class DriveHttp {
 					}
 					if (status == 308) {
 						offset = rangeEnd(response);
-						failures = 0;
 						bytesSent.accept(offset);
+						if (offset > furthest) {
+							furthest = offset;
+							failures = 0;
+						} else if (!recovering) {
+							// The status check after a failure is already counted by that failure.
+							backOffOrGiveUp(++failures, new IOException("The upload stopped making progress; try again"));
+						}
+						recovering = false;
 						continue;
 					}
 					if (status == 404 || status == 410) throw new IOException("Drive dropped the upload; try again");
-					if (retryable(status) && ++failures < ATTEMPTS) {
-						backOff(failures);
-						offset = committedOffset();
-						continue;
-					}
-					throw new IOException("Drive refused the upload: " + describe(response));
+					IOException refused = new IOException("Drive refused the upload: " + describe(response));
+					if (!retryable(status, response)) throw refused;
+					backOffOrGiveUp(++failures, refused);
+					recovering = true;
 				}
 			}
+		}
+
+		/** Waits before the next attempt, or throws {@code cause} if that was the last one. */
+		private void backOffOrGiveUp(int failures, IOException cause) throws IOException {
+			if (failures >= ATTEMPTS) throw cause;
+			backOff(failures);
+		}
+
+		private int chunkLength(long offset) {
+			return (int) Math.min(CHUNK, size - offset);
+		}
+
+		private String chunkRange(long offset) {
+			return size == 0 ? "bytes */0" : "bytes " + offset + "-" + (offset + chunkLength(offset) - 1) + "/" + size;
+		}
+
+		private byte[] chunk(SeekableByteChannel channel, long offset) throws IOException {
+			byte[] chunk = new byte[chunkLength(offset)];
+			channel.position(offset);
+			ByteBuffer buffer = ByteBuffer.wrap(chunk);
+			while (buffer.hasRemaining() && channel.read(buffer) >= 0) {
+				// keep reading
+			}
+			return chunk;
 		}
 
 		private HttpResponse<byte[]> put(String range, byte[] chunk) throws IOException {
@@ -248,16 +289,6 @@ final class DriveHttp {
 				Thread.currentThread().interrupt();
 				throw new IOException("Upload interrupted", e);
 			}
-		}
-
-		private long committedOffset() throws IOException {
-			HttpResponse<byte[]> response = put("bytes */" + size, new byte[0]);
-			if (response.statusCode() == 308) return rangeEnd(response);
-			if (response.statusCode() == 200 || response.statusCode() == 201) {
-				finished = json(response);
-				return size;
-			}
-			throw new IOException("Couldn't resume the upload: " + describe(response));
 		}
 
 		/** Next offset from a 308's {@code Range: bytes=0-N} header (none means nothing stored yet). */
@@ -327,10 +358,10 @@ final class DriveHttp {
 		return body.contains("rateLimitExceeded") || body.contains("userRateLimitExceeded");
 	}
 
-	private static void backOff(int attempt) throws IOException {
+	private void backOff(int attempt) throws IOException {
 		long millis = (long) (500 * Math.pow(2, attempt - 1) * (0.5 + Math.random()));
 		try {
-			Thread.sleep(millis);
+			pause.sleep(millis);
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 			throw new IOException("Interrupted", e);
