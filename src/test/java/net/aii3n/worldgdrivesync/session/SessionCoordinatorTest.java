@@ -570,6 +570,23 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void takeoverIsRefusedIfAHeartbeatLandsBetweenTheStaleCheckAndTheDelete(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		// Bob's Takeover finds the Lock Stale; Alice's Heartbeat resumes just before it reads the Lock again.
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_READ,
+				() -> cloud.beforeNext(InMemoryCloudStore.Call.LOCK_READ, () -> coordinator().heartbeat(shared.id())));
+
+		PlayResult result = bob.takeOver(shared.id(), ProgressListener.NONE);
+
+		assertEquals("Alice", assertInstanceOf(PlayResult.Refused.class, result).heldBy().hostName());
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+		assertEquals(Optional.empty(), bob.localCopy(shared.id()));
+	}
+
+	@Test
 	void whenTwoPlayersPressPlayTogetherTheEarliestLockWins(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		SessionCoordinator bob = friend(bobsSharedsaves);

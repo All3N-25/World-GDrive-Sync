@@ -182,7 +182,9 @@ public final class SessionCoordinator {
 	/**
 	 * Takeover: Play despite a Stale Lock, after the player accepted that its Host's unsaved progress
 	 * may be lost. Replaces the Stale Lock with this player's and starts from the Current Save.
-	 * Refused, changing nothing, if that Host's Heartbeat has resumed meanwhile.
+	 * Refused, changing nothing, if that Host's Heartbeat has resumed meanwhile: the Lock is read
+	 * again just before it is deleted. The cloud store can't delete a Lock only if unchanged
+	 * (ADR-0001), so a Heartbeat landing during the delete itself is still lost.
 	 *
 	 * @return as {@link #play}, but never {@link PlayResult.Stale}
 	 */
@@ -190,7 +192,10 @@ public final class SessionCoordinator {
 		Optional<Lock> held = currentLock(worldId);
 		if (held.isPresent() && !held.get().heldBy(me)) {
 			if (!isStale(held.get())) return new PlayResult.Refused(held.get());
-			cloud.deleteLock(worldId, held.get().hostId());
+			Optional<Lock> reread = currentLock(worldId);
+			// A moved Heartbeat, or another Lock now counting: not the one found Stale.
+			if (reread.isPresent() && !reread.equals(held)) return new PlayResult.Refused(reread.get());
+			if (reread.isPresent()) cloud.deleteLock(worldId, reread.get().hostId());
 		}
 		return becomeHost(worldId, held.isPresent() && held.get().heldBy(me), progress);
 	}
