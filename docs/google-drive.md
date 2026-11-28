@@ -25,3 +25,11 @@ Before adding any dependency, check that it ends up in the jar: `unzip -l build/
 - **A create whose answer is lost** still happened, and sending it again makes a second file. Folders are created under an id from `files.generateIds` (allowed with `drive.file`), so the repeat is refused with a 409 and a failed create can delete what it may have stored. Lock files don't do this: the coordinator copes with duplicates.
 - **`DELETE`** is permanent; there is no trash.
 - **Stale status still depends on clocks.** It compares the viewer's clock with the Host's Heartbeat time. Computing "now" from the `Date` header of a Drive response would remove that dependency; not done yet.
+
+## Known limits
+
+- **Takeover:** the cloud store can't delete a Lock only if unchanged, so a Heartbeat that lands during the delete itself is lost.
+- **One account on two computers:** a Lock is keyed by player. A Pending Upload retry that finds a friend's newer Revision releases this player's Lock, even if the other computer is hosting with it.
+- **Quit during a periodic upload:** once every byte is sent the periodic upload is left to finish, so a stall in its remaining Drive calls delays the final upload.
+- **Full Drive:** a periodic upload that doesn't fit is retried every 5 minutes, repeating the save, the zip and the toast.
+- **Failed share:** an empty world folder can remain if the network is still down during cleanup or the game is killed mid-share.
