@@ -40,8 +40,11 @@ final class DriveHttp {
 	private static final int ATTEMPTS = 4;
 
 	private final GoogleAccount account;
+	private final String api;
 	private final String uploadApi;
 	private final Pause pause;
+	private static final System.Logger LOGGER = System.getLogger(DriveHttp.class.getName());
+
 	private final HttpClient http = HttpClient.newBuilder()
 			.connectTimeout(Duration.ofSeconds(20))
 			// NEVER: resumable uploads answer 308 "Resume Incomplete" with no Location header.
@@ -51,12 +54,16 @@ final class DriveHttp {
 			.build();
 
 	DriveHttp(GoogleAccount account) {
-		this(account, UPLOAD_API, Thread::sleep);
+		this(account, API, UPLOAD_API, Thread::sleep);
 	}
 
-	/** As above, with where uploads go and how a back-off waits: a fake Drive and no waiting in tests. */
-	DriveHttp(GoogleAccount account, String uploadApi, Pause pause) {
+	/**
+	 * As above, with where requests and uploads go and how a back-off waits: a fake Drive and no
+	 * waiting in tests.
+	 */
+	DriveHttp(GoogleAccount account, String api, String uploadApi, Pause pause) {
 		this.account = account;
+		this.api = api;
 		this.uploadApi = uploadApi;
 		this.pause = pause;
 	}
@@ -72,10 +79,53 @@ final class DriveHttp {
 	}
 
 	/** POSTs JSON metadata to {@code url}, for a file without content such as a folder. */
-	JsonObject postJson(String url, JsonObject body) throws IOException {
+	private JsonObject postJson(String url, JsonObject body) throws IOException {
 		return json(send(token -> authorized(url, token)
 				.header("Content-Type", "application/json; charset=UTF-8")
 				.POST(HttpRequest.BodyPublishers.ofString(body.toString()))));
+	}
+
+	/**
+	 * Creates a file without content from its metadata, such as a folder, exactly once, although a
+	 * create whose answer is lost is sent again: the file's id is asked of Drive first, so a repeat
+	 * is refused instead of making a second file. If it fails, the file is deleted (best effort), in
+	 * case Drive stored it.
+	 *
+	 * @return the new file's {@code id} and {@code name}
+	 */
+	JsonObject createOnce(JsonObject metadata) throws IOException {
+		String id;
+		try {
+			id = getJson(api + "/files/generateIds?count=1").getAsJsonArray("ids").get(0).getAsString();
+		} catch (RuntimeException e) {
+			throw new IOException("Unexpected answer from Google Drive", e);
+		}
+		JsonObject withId = metadata.deepCopy();
+		withId.addProperty("id", id);
+		try {
+			try {
+				return postJson(api + "/files?fields=id,name", withId);
+			} catch (IdTaken e) {
+				return getJson(api + "/files/" + id + "?fields=id,name"); // an earlier send stored it
+			}
+		} catch (IOException failure) {
+			try {
+				delete(id);
+			} catch (FileNotFoundException neverStored) {
+				// Nothing to clean up.
+			} catch (IOException e) {
+				LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + id + " after failing to create it", e);
+				failure.addSuppressed(e);
+			}
+			throw failure;
+		}
+	}
+
+	/** Drive's refusal to create a file under an id that is in use. */
+	private static final class IdTaken extends IOException {
+		IdTaken(String message) {
+			super(message);
+		}
 	}
 
 	/** PATCHes a file's metadata (name, parents in the url, appProperties). */
@@ -86,12 +136,12 @@ final class DriveHttp {
 	}
 
 	void delete(String fileId) throws IOException {
-		send(token -> authorized(API + "/files/" + fileId, token).DELETE());
+		send(token -> authorized(api + "/files/" + fileId, token).DELETE());
 	}
 
 	/** A small file's whole content. */
 	byte[] download(String fileId) throws IOException {
-		return send(token -> authorized(API + "/files/" + fileId + "?alt=media", token).GET()).body();
+		return send(token -> authorized(api + "/files/" + fileId + "?alt=media", token).GET()).body();
 	}
 
 	/** Replaces a small file's content, by file id: a file deleted meanwhile is a FileNotFoundException, never re-created. */
@@ -147,7 +197,7 @@ final class DriveHttp {
 
 	/** Streams a large file to {@code target}, reporting bytes as they arrive; retried from the start on failure. */
 	void downloadLargeFile(String fileId, Path target, BytesProgress progress) throws IOException {
-		long size = Long.parseLong(getJson(API + "/files/" + fileId + "?fields=size").get("size").getAsString());
+		long size = Long.parseLong(getJson(api + "/files/" + fileId + "?fields=size").get("size").getAsString());
 		for (int attempt = 1; ; attempt++) {
 			try {
 				streamTo(fileId, target, size, progress);
@@ -164,7 +214,7 @@ final class DriveHttp {
 		boolean renewed = false;
 		while (true) {
 			String token = accessToken();
-			HttpRequest request = authorized(API + "/files/" + fileId + "?alt=media", token)
+			HttpRequest request = authorized(api + "/files/" + fileId + "?alt=media", token)
 					.timeout(Duration.ofMinutes(5))
 					.GET().build();
 			HttpResponse<InputStream> response;
@@ -349,6 +399,7 @@ final class DriveHttp {
 				continue;
 			}
 			if (status == 404) throw new FileNotFoundException("Google Drive error: " + describe(response));
+			if (status == 409) throw new IdTaken("Google Drive error: " + describe(response));
 			if (storageFull(status, response)) throw new StorageFull("Google Drive error: " + describe(response));
 			throw new IOException("Google Drive error: " + describe(response));
 		}

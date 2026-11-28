@@ -20,7 +20,10 @@ public interface CloudStore {
 	/** Every Shared World folder on the account, including ones whose sharing never finished. */
 	List<CloudWorld> listWorlds() throws IOException;
 
-	/** Makes a new, empty folder for one Shared World. */
+	/**
+	 * Makes a new, empty folder for one Shared World. Makes only one, however often the request is
+	 * sent, and if it fails, leaves none behind (best effort).
+	 */
 	CloudWorld createWorld(String name) throws IOException;
 
 	/** Deletes one Shared World folder and everything in it, for good. */

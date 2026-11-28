@@ -47,7 +47,7 @@ class ResumableUploadTest {
 				"{\"refreshToken\":\"refresh\",\"accountEmail\":\"shared-worlds@example.com\"}");
 		GoogleEndpoints endpoints = new GoogleEndpoints(null, fake.tokenEndpoint(), null, null);
 		GoogleAccount account = new GoogleAccount(signIn, new OAuthClient("test-client-id", "test-client-secret"), endpoints);
-		drive = new DriveHttp(account, fake.uploadApi(), pauses::add);
+		drive = new DriveHttp(account, DriveHttp.API, fake.uploadApi(), pauses::add);
 	}
 
 	@AfterEach
