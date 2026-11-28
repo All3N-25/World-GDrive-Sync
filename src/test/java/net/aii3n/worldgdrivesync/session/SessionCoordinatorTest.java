@@ -987,13 +987,62 @@ class SessionCoordinatorTest {
 
 		RetryResult result = coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
 
-		assertEquals(3, assertInstanceOf(RetryResult.Uploaded.class, result).current().revision());
+		assertEquals(2, assertInstanceOf(RetryResult.Uploaded.class, result).current().revision());
 		assertEquals("chunks with Alice's house", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
 		assertEquals(List.of(), unmergedBackups(shared.id()));
+		assertEquals(1, coordinator().backups(shared.id()).size(), "the stored upload isn't sent again");
 		assertEquals(List.of(), cloud.lockHolders(shared.id()));
 		assertEquals(WorldStatus.FREE, friend(bobsSharedsaves).listSharedWorlds().getFirst().status());
-		assertEquals(new LocalCopy(local.folder(), 3, false), coordinator().localCopy(shared.id()).orElseThrow());
+		assertEquals(new LocalCopy(local.folder(), 2, false), coordinator().localCopy(shared.id()).orElseThrow());
 		assertEquals(List.of(), coordinator().pendingUploads());
+	}
+
+	@Test
+	void aStoredUploadWhoseAnswerWasLostIsFinishedEvenWithNoRoomToSendItAgain() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
+		cloud.setFreeSpace(0);
+
+		coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+		assertEquals(List.of(), coordinator().pendingUploads());
+	}
+
+	@Test
+	void aStoredUploadIsStillRecognisedAfterPlayingWasBackedOutOf() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		coordinator().leaveWithoutPlaying(shared.id());
+		cloud.setFreeSpace(0);
+
+		coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		assertEquals(2, cloud.metadata(shared.id()).revision());
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void progressMadeSinceAStoredUploadWhoseAnswerWasLostIsStillUploaded() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().periodicUpload(shared.id(),
+				folder -> WorldZip.copyForUpload(local.folder(), folder), ProgressListener.NONE));
+		// Same size, so only the contents tell them apart. Then the game crashes.
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's tower");
+
+		coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		assertEquals(3, cloud.metadata(shared.id()).revision());
+		assertEquals("chunks with Alice's tower", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
 	}
 
 	@Test

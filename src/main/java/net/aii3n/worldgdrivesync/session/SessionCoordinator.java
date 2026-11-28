@@ -645,13 +645,15 @@ public final class SessionCoordinator {
 	 * Retries a Pending Upload left by a failed {@link #quit}, or by a hosting session that ended
 	 * without one (see {@link #pendingUploads}): uploads the Local Copy as the next Revision, clears
 	 * the Pending Upload and releases the Lock, just like a normal quit. If it fails, this throws and
-	 * the Lock and the Pending Upload are kept.
+	 * the Lock and the Pending Upload are kept. If the Current Save turns out to be an upload of this
+	 * Local Copy whose answer was lost, and the copy hasn't changed since, nothing is uploaded again:
+	 * the Pending Upload is cleared and the Lock released.
 	 *
 	 * <p>It never overwrites a newer Revision or uploads under another Host. If the cloud has moved
 	 * past the Local Copy's Revision (someone Took Over and uploaded), the Pending Upload is kept as
 	 * an Unmerged Backup instead, this player's Lock is released if they still hold one, and the
 	 * Local Copy is replaced with the newer Revision. An upload of this Local Copy whose answer was
-	 * lost isn't someone else's: this uploads on top of it. If someone else holds the Lock but hasn't
+	 * lost isn't someone else's: if the copy has changed since, this uploads on top of it. If someone else holds the Lock but hasn't
 	 * uploaded yet, this throws and the Pending Upload is kept. If nobody holds the Lock (it was
 	 * Taken Over and given up), this player takes it again for the upload.
 	 */
@@ -667,6 +669,7 @@ public final class SessionCoordinator {
 		WorldMetadata current = cloud.readMetadata(worldId)
 				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
 		record = record.confirmedBy(current);
+		if (record.isStoredAs(current, folder)) return finishStoredUpload(worldId, current);
 		if (current.revision() > record.revision()) {
 			Backup unmerged = keepAsUnmergedBackup(worldId, record, progress);
 			// The progress is safe now and nothing is left to upload, so the Lock would only keep friends out.
@@ -681,6 +684,23 @@ public final class SessionCoordinator {
 		}
 		heldLocks.add(worldId); // Kept since before a restart, or just taken: Heartbeats from now on.
 		return new RetryResult.Uploaded(quit(worldId, progress));
+	}
+
+	/**
+	 * Finishes like a normal quit for a Local Copy the cloud turns out to hold already, as
+	 * {@code current}: an upload that was stored although its answer was lost. Nothing is sent again,
+	 * so no room is needed for it.
+	 */
+	private RetryResult finishStoredUpload(String worldId, WorldMetadata current) throws IOException {
+		new LocalCopyRecord(current.revision()).write(localCopies.resolve(worldId));
+		pruneBackups(worldId);
+		releaseLockOrRetryLater(worldId);
+		try {
+			warnIfNearlyFull(cloud.currentSaveSize(worldId));
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't check whether the account is nearly full", e);
+		}
+		return new RetryResult.Uploaded(current);
 	}
 
 	/** Remembers in the Local Copy that it still has to be uploaded; {@code failure} is why. */
@@ -750,7 +770,7 @@ public final class SessionCoordinator {
 		Files.createDirectories(localCopies);
 		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
 		try {
-			WorldZip.zip(worldFolder, zip, progress);
+			String contents = WorldZip.zip(worldFolder, zip, progress);
 			long size = Files.size(zip);
 			WorldMetadata previous = cloud.readMetadata(worldId)
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
@@ -761,7 +781,9 @@ public final class SessionCoordinator {
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
 			uploadIfItFits(() -> worldName(worldId), size, () -> {
 				// Written before sending: the upload may be stored although its answer never arrives.
-				if (local.isPresent()) local.get().withSentUpload(Optional.of(next)).write(localFolder);
+				if (local.isPresent()) {
+					local.get().withSentUpload(Optional.of(new LocalCopyRecord.SentUpload(next, contents))).write(localFolder);
+				}
 				return cloud.replaceCurrentSave(worldId, zip, next, BackupLabel.of(previous),
 						sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 			});

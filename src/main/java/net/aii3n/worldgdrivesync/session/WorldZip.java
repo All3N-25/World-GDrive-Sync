@@ -5,9 +5,14 @@ import net.aii3n.worldgdrivesync.io.AtomicFile;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -73,18 +78,52 @@ public final class WorldZip {
 	private WorldZip() {
 	}
 
-	/** Zips a world folder for an upload, leaving out the same files as {@link #copyForUpload}. */
-	static void zip(Path worldFolder, Path zipFile, ProgressListener progress) throws IOException {
+	/**
+	 * Zips a world folder for an upload, leaving out the same files as {@link #copyForUpload}.
+	 *
+	 * @return the {@link #contentsDigest} of what went into the zip
+	 */
+	static String zip(Path worldFolder, Path zipFile, ProgressListener progress) throws IOException {
 		List<Path> files = filesToUpload(worldFolder);
+		MessageDigest contents = sha256();
 		try (OutputStream out = Files.newOutputStream(zipFile); ZipOutputStream zip = new ZipOutputStream(out)) {
 			int done = 0;
 			for (Path file : files) {
 				zip.setLevel(compressionLevel(file));
 				zip.putNextEntry(new ZipEntry(entryName(worldFolder, file)));
-				Files.copy(file, zip);
+				addToDigest(contents, worldFolder, file, zip);
 				zip.closeEntry();
 				progress.onProgress(ProgressListener.Step.ZIPPING, ++done, files.size());
 			}
+		}
+		return HexFormat.of().formatHex(contents.digest());
+	}
+
+	/**
+	 * Tells apart what uploads of world folders would contain: two are the same exactly when every
+	 * file's path and contents are. Reads all of them.
+	 */
+	static String contentsDigest(Path worldFolder) throws IOException {
+		MessageDigest contents = sha256();
+		for (Path file : filesToUpload(worldFolder)) addToDigest(contents, worldFolder, file, OutputStream.nullOutputStream());
+		return HexFormat.of().formatHex(contents.digest());
+	}
+
+	/** Copies {@code file} to {@code out}, adding its path and what was copied to {@code contents}. */
+	private static void addToDigest(MessageDigest contents, Path worldFolder, Path file, OutputStream out) throws IOException {
+		MessageDigest one = sha256();
+		// Not closed: that would close out, which may have more files to come.
+		Files.copy(file, new DigestOutputStream(out, one));
+		contents.update(entryName(worldFolder, file).getBytes(StandardCharsets.UTF_8));
+		contents.update((byte) 0); // no path contains one, and a file's digest has a fixed length
+		contents.update(one.digest());
+	}
+
+	private static MessageDigest sha256() {
+		try {
+			return MessageDigest.getInstance("SHA-256");
+		} catch (NoSuchAlgorithmException e) {
+			throw new IllegalStateException("Every Java runtime has SHA-256", e);
 		}
 	}
 
