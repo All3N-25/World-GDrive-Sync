@@ -44,7 +44,9 @@ final class InMemoryCloudStore implements CloudStore {
 		/** Downloading the Current Save. */
 		DOWNLOAD,
 		/** Replacing the Current Save (every upload but the first). */
-		REPLACE
+		REPLACE,
+		/** Reading a world's Locks. */
+		LOCK_READ
 	}
 
 	/** Something a test runs in the middle of a cloud call, such as another player's Play. */
@@ -214,6 +216,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized List<Lock> readLocks(String worldId) throws IOException {
+		runHook(Call.LOCK_READ);
 		if (failLockReads) throw new IOException("Network down (simulated)");
 		return List.copyOf(folder(worldId).locks.values());
 	}
