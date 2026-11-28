@@ -38,7 +38,7 @@ import java.util.function.LongConsumer;
  *   &lt;world name&gt;/              folder        t=world   (its Drive id is the world id)
  *     current.zip               Current Save  t=current, r=&lt;Revision&gt;, s=&lt;savedAt&gt;
  *     metadata.json             only in worlds shared before r/s moved onto current.zip  t=meta
- *     lock-&lt;host id&gt;.json       one per Lock  t=lock, h=&lt;host id&gt;
+ *     lock-&lt;host id&gt;.json       one per Lock (twice if its create was retried)  t=lock, h=&lt;host id&gt;
  *     incoming.zip              a replacing upload in progress  t=incoming
  *     backups/                  folder        t=backups
  *       backup-r&lt;rev&gt;-&lt;savedAt&gt;.zip   one per Backup  t=backup, r, s (+ uh, un, us if Unmerged)
@@ -48,6 +48,9 @@ public final class DriveCloudStore implements CloudStore {
 	private static final String API = DriveHttp.API;
 	private static final String FOLDER = "application/vnd.google-apps.folder";
 	private static final String ROOT_NAME = "World GDrive Sync";
+	/** Earliest first by Drive's own createdTime; the file id breaks ties. */
+	private static final Comparator<JsonObject> OLDEST_FIRST = Comparator
+			.comparing((JsonObject f) -> Instant.parse(string(f, "createdTime"))).thenComparing(f -> string(f, "id"));
 	private static final System.Logger LOGGER = System.getLogger(DriveCloudStore.class.getName());
 
 	private final DriveHttp drive;
@@ -304,8 +307,7 @@ public final class DriveCloudStore implements CloudStore {
 	public List<Lock> readLocks(String worldId) throws IOException {
 		List<Lock> locks = new ArrayList<>();
 		List<JsonObject> files = new ArrayList<>(search("'" + worldId + "' in parents and " + tagged("lock")));
-		// Earliest first by Drive's own createdTime (search orders by it); the file id breaks ties.
-		files.sort(Comparator.comparing((JsonObject f) -> Instant.parse(string(f, "createdTime"))).thenComparing(f -> string(f, "id")));
+		files.sort(OLDEST_FIRST);
 		for (JsonObject file : files) {
 			String body;
 			try {
@@ -362,21 +364,30 @@ public final class DriveCloudStore implements CloudStore {
 		return json.toString().getBytes(StandardCharsets.UTF_8);
 	}
 
+	/** Deletes every Lock file of {@code hostId} the search finds. */
 	@Override
-	public void deleteLock(String worldId, String hostId) throws IOException {
-		Optional<String> file = lockFile(worldId, hostId);
-		if (file.isEmpty()) return;
-		try {
-			drive.delete(file.get());
-		} catch (FileNotFoundException e) {
-			// Already gone: two players Took Over the same Stale Lock at once.
+	public boolean deleteLock(String worldId, String hostId) throws IOException {
+		boolean deleted = false;
+		for (JsonObject file : lockFiles(worldId, hostId)) {
+			try {
+				drive.delete(string(file, "id"));
+				deleted = true;
+			} catch (FileNotFoundException e) {
+				// Already gone: two players Took Over the same Stale Lock at once.
+			}
 		}
+		return deleted;
 	}
 
+	/** The oldest of {@code hostId}'s Lock files, the one {@link #readLocks} lists first. */
 	private Optional<String> lockFile(String worldId, String hostId) throws IOException {
-		List<JsonObject> found = search("'" + worldId + "' in parents and " + tagged("lock")
+		return lockFiles(worldId, hostId).stream().min(OLDEST_FIRST).map(file -> string(file, "id"));
+	}
+
+	/** Normally none or one; more if a create was retried after Drive had already stored the file. */
+	private List<JsonObject> lockFiles(String worldId, String hostId) throws IOException {
+		return search("'" + worldId + "' in parents and " + tagged("lock")
 				+ " and appProperties has { key='h' and value='" + hostId.replace("\\", "\\\\").replace("'", "\\'") + "' }");
-		return found.isEmpty() ? Optional.empty() : Optional.of(string(found.getFirst(), "id"));
 	}
 
 	// --- Drive helpers ---
