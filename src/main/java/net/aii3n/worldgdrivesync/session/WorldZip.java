@@ -7,8 +7,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Stream;
+import java.util.zip.Deflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -20,6 +22,13 @@ public final class WorldZip {
 	 * world runs, and unreadable on Windows), and the Local Copy's own record.
 	 */
 	static final Set<String> SKIPPED = Set.of("session.lock", LocalCopyRecord.FILE_NAME);
+
+	/**
+	 * File name endings (lower case) of formats that are compressed already: deflating them again
+	 * costs time and hardly shrinks them.
+	 */
+	private static final Set<String> ALREADY_COMPRESSED = Set.of(
+			".sqlite", ".png", ".gz", ".zip", ".jar", ".ogg", ".mp3", ".jpg", ".jpeg", ".webp");
 
 	/**
 	 * Copies a saved world folder for an upload: leaves out what no upload contains, which is the
@@ -64,6 +73,7 @@ public final class WorldZip {
 		try (OutputStream out = Files.newOutputStream(zipFile); ZipOutputStream zip = new ZipOutputStream(out)) {
 			int done = 0;
 			for (Path file : files) {
+				zip.setLevel(compressionLevel(file));
 				zip.putNextEntry(new ZipEntry(entryName(worldFolder, file)));
 				Files.copy(file, zip);
 				zip.closeEntry();
@@ -92,6 +102,15 @@ public final class WorldZip {
 				progress.onProgress(ProgressListener.Step.UNZIPPING, ++done, total);
 			}
 		}
+	}
+
+	/**
+	 * Every entry stays DEFLATED, even at no compression: a STORED entry needs its CRC before its
+	 * data, which would mean reading the file twice.
+	 */
+	private static int compressionLevel(Path file) {
+		String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
+		return ALREADY_COMPRESSED.stream().anyMatch(name::endsWith) ? Deflater.NO_COMPRESSION : Deflater.BEST_SPEED;
 	}
 
 	private static String entryName(Path root, Path file) {
