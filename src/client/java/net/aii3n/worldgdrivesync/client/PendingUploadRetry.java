@@ -40,6 +40,15 @@ final class PendingUploadRetry {
 
 	static void register() {
 		ClientLifecycleEvents.CLIENT_STARTED.register(client -> {
+			// The network thread's first task, so it is over before anything there uses sharedsaves/,
+			// the retry included. Needs no account.
+			SharedWorlds.get().run(coordinator -> {
+				coordinator.recoverLocalCopiesAndDeleteLeftovers();
+				return null;
+			}).exceptionally(e -> {
+				WorldGDriveSync.LOGGER.warn("Couldn't clean up after earlier sessions in sharedsaves", e);
+				return null;
+			});
 			if (!GoogleConnection.get().account().isConnected()) return;
 			SharedWorlds.get().run(coordinator -> {
 				SharedWorlds.get().launchRetry().run(coordinator, LOG);
