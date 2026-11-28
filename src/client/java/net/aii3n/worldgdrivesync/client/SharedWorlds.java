@@ -74,6 +74,11 @@ public final class SharedWorlds {
 		return coordinator.get();
 	}
 
+	/** The background threads coordinator calls run on. */
+	CoordinatorRunner runner() {
+		return runner;
+	}
+
 	/** Runs {@code task} with the coordinator on the network thread. */
 	public <T> CompletableFuture<T> run(CoordinatorTask<T> task) {
 		return runner.run(task);
