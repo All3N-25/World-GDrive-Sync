@@ -43,7 +43,8 @@ public final class SessionCoordinator {
 	/** The worlds this player took the Lock on through this coordinator and hasn't released. */
 	private final Set<String> heldLocks = ConcurrentHashMap.newKeySet();
 	/**
-	 * Worlds whose Lock {@link #quit} couldn't delete after its upload succeeded; Heartbeats retry.
+	 * Worlds whose Lock couldn't be deleted after {@link #quit}'s upload, or an Unmerged Backup on
+	 * retry, succeeded; Heartbeats retry.
 	 * Synchronized on while retrying and while {@link #takeLock} cancels a retry, so a retry never
 	 * deletes a Lock just taken again.
 	 */
@@ -243,7 +244,8 @@ public final class SessionCoordinator {
 	/** Whether someone uploaded a newer Revision than this Local Copy's; false if that can't be told. */
 	private boolean cloudMovedPast(String worldId, LocalCopyRecord record) {
 		try {
-			return cloud.readMetadata(worldId).map(current -> current.revision() > record.revision()).orElse(false);
+			return cloud.readMetadata(worldId)
+					.map(current -> current.revision() > record.confirmedBy(current).revision()).orElse(false);
 		} catch (IOException e) {
 			return false;
 		}
@@ -296,8 +298,12 @@ public final class SessionCoordinator {
 	private Optional<Backup> bringLocalCopyUpToDate(String worldId, ProgressListener progress) throws IOException {
 		WorldMetadata current = cloud.readMetadata(worldId)
 				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-		Optional<LocalCopyRecord> record = LocalCopyRecord.read(localCopies.resolve(worldId));
-		if (record.isPresent() && record.get().revision() >= current.revision()) return Optional.empty();
+		Path folder = localCopies.resolve(worldId);
+		Optional<LocalCopyRecord> record = LocalCopyRecord.read(folder).map(local -> local.confirmedBy(current));
+		if (record.isPresent() && record.get().revision() >= current.revision()) {
+			record.get().write(folder);
+			return Optional.empty();
+		}
 		Optional<Backup> unmerged = Optional.empty();
 		if (record.isPresent() && record.get().hasUnsavedProgress()) unmerged = Optional.of(keepAsUnmergedBackup(worldId, record.get(), progress));
 		download(worldId, current, progress);
@@ -398,13 +404,18 @@ public final class SessionCoordinator {
 			markPendingUpload(local.folder(), e);
 			throw e;
 		}
+		releaseLockOrRetryLater(worldId);
+		return uploaded;
+	}
+
+	/** Releases the Lock once the progress it protected is in the cloud; a failure is retried by Heartbeats. */
+	private void releaseLockOrRetryLater(String worldId) {
 		try {
 			releaseLock(worldId);
 		} catch (IOException | RuntimeException e) {
 			locksToRelease.add(worldId);
 			LOGGER.log(System.Logger.Level.WARNING, "Uploaded " + worldId + " but couldn't release its Lock; will retry with the next Heartbeat", e);
 		}
-		return uploaded;
 	}
 
 	/**
@@ -415,9 +426,10 @@ public final class SessionCoordinator {
 	 *
 	 * <p>It never overwrites a newer Revision or uploads under another Host. If the cloud has moved
 	 * past the Local Copy's Revision (someone Took Over and uploaded), the Pending Upload is kept as
-	 * an Unmerged Backup instead and the Local Copy replaced with the newer Revision; the Lock isn't
-	 * touched. If someone else holds the Lock but hasn't uploaded yet, this throws and the Pending
-	 * Upload is kept. If nobody holds the Lock (it was Taken Over and given up), this player takes it
+	 * an Unmerged Backup instead, this player's Lock is released if they still hold one, and the
+	 * Local Copy is replaced with the newer Revision. An upload of this Local Copy whose answer was
+	 * lost isn't someone else's: this uploads on top of it. If someone else holds the Lock but hasn't
+	 * uploaded yet, this throws and the Pending Upload is kept. If nobody holds the Lock (it was Taken Over and given up), this player takes it
 	 * again for the upload.
 	 */
 	public RetryResult retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
@@ -431,8 +443,11 @@ public final class SessionCoordinator {
 		}
 		WorldMetadata current = cloud.readMetadata(worldId)
 				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
+		record = record.confirmedBy(current);
 		if (current.revision() > record.revision()) {
 			Backup unmerged = keepAsUnmergedBackup(worldId, record, progress);
+			// The progress is safe now and nothing is left to upload, so the Lock would only keep friends out.
+			releaseLockOrRetryLater(worldId);
 			download(worldId, current, progress);
 			return new RetryResult.KeptAsUnmergedBackup(unmerged);
 		}
@@ -509,14 +524,17 @@ public final class SessionCoordinator {
 			long size = Files.size(zip);
 			WorldMetadata previous = cloud.readMetadata(worldId)
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-			ensureStillHost(worldId, previous);
+			Path localFolder = localCopies.resolve(worldId);
+			Optional<LocalCopyRecord> local = LocalCopyRecord.read(localFolder).map(record -> record.confirmedBy(previous));
+			ensureStillHost(worldId, previous, local);
 
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
+			// Written before sending: the upload may be stored although its answer never arrives.
+			if (local.isPresent()) local.get().withSentUpload(Optional.of(next)).write(localFolder);
 			cloud.replaceCurrentSave(worldId, zip, next, BackupLabel.of(previous),
 					sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
-			Path localFolder = localCopies.resolve(worldId);
 			LocalCopyRecord uploaded = LocalCopyRecord.read(localFolder).orElse(new LocalCopyRecord(next.revision()))
-					.withRevision(next.revision()).withPendingUpload(false);
+					.withRevision(next.revision()).withPendingUpload(false).withSentUpload(Optional.empty());
 			if (endsSession) uploaded = uploaded.withSessionStartedAt(Optional.empty());
 			uploaded.write(localFolder);
 			pruneBackups(worldId);
@@ -531,13 +549,12 @@ public final class SessionCoordinator {
 	 * holds the Lock (a friend may have Taken Over while this game hung or lost its connection) and
 	 * the Current Save is still the Revision this Local Copy came from or last uploaded.
 	 */
-	private void ensureStillHost(String worldId, WorldMetadata current) throws IOException {
+	private void ensureStillHost(String worldId, WorldMetadata current, Optional<LocalCopyRecord> local) throws IOException {
 		Optional<Lock> held = currentLock(worldId);
 		if (held.isEmpty() || !held.get().heldBy(me)) {
 			throw new IOException(held.map(lock -> lock.hostName() + " Took Over").orElse("Your Lock is gone")
 					+ ", so this upload won't replace the Shared World; your progress is kept on this computer");
 		}
-		Optional<LocalCopyRecord> local = LocalCopyRecord.read(localCopies.resolve(worldId));
 		if (local.isPresent() && current.revision() > local.get().revision()) {
 			throw new IOException("Someone uploaded Revision " + current.revision() + " since, so this upload won't overwrite it");
 		}
@@ -563,7 +580,7 @@ public final class SessionCoordinator {
 	 * final upload, and on while a Pending Upload keeps it. The game calls this once a minute on a
 	 * thread of its own, so a long download or upload doesn't hold the Heartbeats up.
 	 *
-	 * Also retries releasing any Lock {@link #quit} couldn't release after its upload.
+	 * Also retries releasing any Lock that couldn't be released after an upload.
 	 *
 	 * @return the worlds whose Lock this player has lost (a friend Took Over); each is reported once
 	 * @throws IOException if a Heartbeat or release couldn't be sent; the others are still tried

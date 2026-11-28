@@ -22,18 +22,22 @@ import java.util.Properties;
  *                         session crashed (or the game was closed), so the copy may hold progress
  *                         the cloud doesn't have, even if its Revision matches the cloud's (a
  *                         periodic upload updates the Revision mid-session).
+ * @param sentUpload       what the last upload of this copy was sent as, until its answer arrives.
+ *                         A Current Save carrying exactly this is that upload, stored although its
+ *                         answer was lost (see {@link #confirmedBy}).
  *
  * <p>Listing Shared Worlds reads records while an upload or download replaces them on another
  * thread. {@link #read} and {@link #write} take turns on this class's monitor, because Windows
  * refuses to rename over, or delete the folder of, a file that is open. Take it too before
  * replacing an existing Local Copy's folder.
  */
-record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> sessionStartedAt) {
+record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> sessionStartedAt,
+		Optional<WorldMetadata> sentUpload) {
 	static final String FILE_NAME = "world-gdrive-sync.properties";
 
 	/** A record with nothing waiting to be uploaded and no open session. */
 	LocalCopyRecord(int revision) {
-		this(revision, false, Optional.empty());
+		this(revision, false, Optional.empty(), Optional.empty());
 	}
 
 	/** Whether this copy may hold progress the cloud doesn't have: a crashed session or a Pending Upload. */
@@ -41,16 +45,29 @@ record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> se
 		return pendingUpload || sessionStartedAt.isPresent();
 	}
 
+	/**
+	 * This record, knowing that {@code current} describes the Current Save: if that is the upload
+	 * this copy sent and never heard back about, the copy is at its Revision, not behind it.
+	 */
+	LocalCopyRecord confirmedBy(WorldMetadata current) {
+		if (!sentUpload.equals(Optional.of(current))) return this;
+		return withRevision(current.revision()).withSentUpload(Optional.empty());
+	}
+
 	LocalCopyRecord withRevision(int revision) {
-		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt);
+		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt, sentUpload);
 	}
 
 	LocalCopyRecord withPendingUpload(boolean pendingUpload) {
-		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt);
+		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt, sentUpload);
 	}
 
 	LocalCopyRecord withSessionStartedAt(Optional<Instant> sessionStartedAt) {
-		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt);
+		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt, sentUpload);
+	}
+
+	LocalCopyRecord withSentUpload(Optional<WorldMetadata> sentUpload) {
+		return new LocalCopyRecord(revision, pendingUpload, sessionStartedAt, sentUpload);
 	}
 
 	static synchronized Optional<LocalCopyRecord> read(Path worldFolder) {
@@ -61,7 +78,9 @@ record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> se
 			properties.load(in);
 			return Optional.of(new LocalCopyRecord(Integer.parseInt(properties.getProperty("revision")),
 					Boolean.parseBoolean(properties.getProperty("pendingUpload")),
-					Optional.ofNullable(properties.getProperty("sessionStartedAt")).map(Instant::parse)));
+					Optional.ofNullable(properties.getProperty("sessionStartedAt")).map(Instant::parse),
+					Optional.ofNullable(properties.getProperty("sentRevision")).map(sent ->
+							new WorldMetadata(Integer.parseInt(sent), Instant.parse(properties.getProperty("sentSavedAt"))))));
 		} catch (IOException | RuntimeException e) {
 			return Optional.empty();
 		}
@@ -72,6 +91,10 @@ record LocalCopyRecord(int revision, boolean pendingUpload, Optional<Instant> se
 		properties.setProperty("revision", Integer.toString(revision));
 		if (pendingUpload) properties.setProperty("pendingUpload", "true");
 		sessionStartedAt.ifPresent(startedAt -> properties.setProperty("sessionStartedAt", startedAt.toString()));
+		sentUpload.ifPresent(sent -> {
+			properties.setProperty("sentRevision", Integer.toString(sent.revision()));
+			properties.setProperty("sentSavedAt", sent.savedAt().toString());
+		});
 		synchronized (LocalCopyRecord.class) {
 			// Atomic: a half-written record reads as no record, and Play would then replace the Local Copy.
 			AtomicFile.write(worldFolder.resolve(FILE_NAME),
