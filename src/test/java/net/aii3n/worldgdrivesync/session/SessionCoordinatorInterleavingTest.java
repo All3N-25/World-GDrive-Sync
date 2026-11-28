@@ -62,6 +62,9 @@ class SessionCoordinatorInterleavingTest {
 	private static final Instant START = Instant.parse("2026-11-27T18:00:00Z");
 	private static final Settings SETTINGS = Settings.DEFAULTS.withPeriodicUploadInterval(Duration.ofMinutes(10)).withBackupCount(2);
 	private static final String PROGRESS = "progress.txt";
+	/** The cloud calls steps run in the middle of. Not Lock reads, which nearly every step makes. */
+	private static final InMemoryCloudStore.Call[] INTERLEAVED = {InMemoryCloudStore.Call.LOCK_WRITE,
+			InMemoryCloudStore.Call.RESTORE, InMemoryCloudStore.Call.DOWNLOAD, InMemoryCloudStore.Call.REPLACE};
 	private static final List<Player> PLAYERS = List.of(
 			new Player("uuid-alice", "Alice"), new Player("uuid-bob", "Bob"), new Player("uuid-carol", "Carol"));
 
@@ -370,7 +373,7 @@ class SessionCoordinatorInterleavingTest {
 
 		/** Something that happens in the middle of a cloud call. */
 		void scheduleInterleaving() {
-			InMemoryCloudStore.Call call = InMemoryCloudStore.Call.values()[random.nextInt(InMemoryCloudStore.Call.values().length)];
+			InMemoryCloudStore.Call call = INTERLEAVED[random.nextInt(INTERLEAVED.length)];
 			boolean freezeCaller = random.nextInt(3) == 0;
 			// Only a download or an upload takes long; writing a Lock or restoring takes seconds, unless the game froze.
 			boolean slow = freezeCaller || call == InMemoryCloudStore.Call.DOWNLOAD || call == InMemoryCloudStore.Call.REPLACE;

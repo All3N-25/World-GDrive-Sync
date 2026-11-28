@@ -45,7 +45,9 @@ final class InMemoryCloudStore implements CloudStore {
 		/** Downloading the Current Save. */
 		DOWNLOAD,
 		/** Replacing the Current Save (every upload but the first). */
-		REPLACE
+		REPLACE,
+		/** Reading a world's Locks. */
+		LOCK_READ
 	}
 
 	/** Something a test runs in the middle of a cloud call, such as another player's Play. */
@@ -54,6 +56,7 @@ final class InMemoryCloudStore implements CloudStore {
 		void run() throws IOException;
 	}
 	private boolean failBackupDeletes;
+	private boolean failWorldDeletes;
 	private Runnable afterChunkSent = () -> {
 	};
 
@@ -114,6 +117,13 @@ final class InMemoryCloudStore implements CloudStore {
 		String id = "world-" + nextId++;
 		worlds.put(id, new Folder(name));
 		return new CloudWorld(id, name);
+	}
+
+	@Override
+	public synchronized void deleteWorld(String worldId) throws IOException {
+		if (failWorldDeletes) throw new IOException("Couldn't delete the folder (simulated)");
+		folder(worldId);
+		worlds.remove(worldId);
 	}
 
 	@Override
@@ -216,6 +226,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	@Override
 	public synchronized List<Lock> readLocks(String worldId) throws IOException {
+		runHook(Call.LOCK_READ);
 		if (failLockReads) throw new IOException("Network down (simulated)");
 		return List.copyOf(folder(worldId).locks);
 	}
@@ -378,6 +389,11 @@ final class InMemoryCloudStore implements CloudStore {
 	/** From now on deleting a Backup fails. */
 	void failBackupDeletes() {
 		failBackupDeletes = true;
+	}
+
+	/** From now on deleting a world folder fails. */
+	void failWorldDeletes() {
+		failWorldDeletes = true;
 	}
 
 	synchronized int worldCount() {

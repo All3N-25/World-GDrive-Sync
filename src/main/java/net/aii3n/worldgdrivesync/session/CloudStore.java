@@ -20,6 +20,9 @@ public interface CloudStore {
 	/** Makes a new, empty folder for one Shared World. */
 	CloudWorld createWorld(String name) throws IOException;
 
+	/** Deletes one Shared World folder and everything in it, for good. */
+	void deleteWorld(String worldId) throws IOException;
+
 	/**
 	 * The Current Save's metadata (its Revision and when it was saved), or empty if the world has no
 	 * Current Save yet.

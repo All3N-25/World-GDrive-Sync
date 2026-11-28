@@ -75,6 +75,12 @@ public final class DriveCloudStore implements CloudStore {
 		return new CloudWorld(string(folder, "id"), string(folder, "name"));
 	}
 
+	/** Drive deletes a folder's contents with it. */
+	@Override
+	public void deleteWorld(String worldId) throws IOException {
+		drive.delete(worldId);
+	}
+
 	/**
 	 * The Revision and save time on the Current Save's own {@code appProperties}. If several files are
 	 * tagged {@code t=current} (a replacement whose clean-up failed), the highest Revision is the
