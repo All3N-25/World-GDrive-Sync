@@ -175,7 +175,26 @@ class SessionCoordinatorInterleavingTest {
 		}
 
 		SessionCoordinator newGame(Sim sim) {
-			return new SessionCoordinator(cloud, clock, sim.sharedsaves, sim.player, () -> SETTINGS);
+			return new SessionCoordinator(cloud, tickingClock(), sim.sharedsaves, sim.player, () -> SETTINGS);
+		}
+
+		/**
+		 * The shared clock, moved on a microsecond at each reading, as real clocks are: a Local Copy
+		 * knows its own upload by the Revision and save time it was sent with, so two players' uploads
+		 * must never share an instant.
+		 */
+		SessionClock tickingClock() {
+			return new SessionClock() {
+				@Override
+				public Instant instant() {
+					clock.advance(Duration.ofNanos(1_000));
+					return clock.instant();
+				}
+
+				@Override
+				public void sleep(Duration duration) {
+				}
+			};
 		}
 
 		// --- Steps ---

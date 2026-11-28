@@ -357,6 +357,37 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void theRetryThatMakesAnUnmergedBackupReleasesALockThisPlayerStillHolds(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		leaveAPendingUploadThenLetBobTakeOverAndUpload(shared.id(), bobsSharedsaves);
+		// A Lock of Alice's is in the cloud again, and the download after the Unmerged Backup fails.
+		cloud.writeLock(shared.id(), Lock.takenBy(ALICE, clock.instant()));
+		cloud.failDownloads();
+
+		assertThrows(IOException.class, () -> coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE));
+
+		assertEquals(List.of(), cloud.lockHolders(shared.id()), "nothing left to retry, so the Lock mustn't stay");
+		assertEquals(1, unmergedBackups(shared.id()).size());
+		assertEquals(2, cloud.metadata(shared.id()).revision());
+		assertEquals("chunks with Bob's farm", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+	}
+
+	@Test
+	void aLockThatCouldntBeReleasedAfterAnUnmergedBackupIsReleasedByTheNextHeartbeat(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		leaveAPendingUploadThenLetBobTakeOverAndUpload(shared.id(), bobsSharedsaves);
+		cloud.writeLock(shared.id(), Lock.takenBy(ALICE, clock.instant()));
+		cloud.failLockDeletes();
+		SessionCoordinator alice = coordinator();
+
+		assertInstanceOf(RetryResult.KeptAsUnmergedBackup.class, alice.retryPendingUpload(shared.id(), ProgressListener.NONE));
+		cloud.lockDeletesWork();
+		alice.heartbeatHeldLocks();
+
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
 	void aHostWhoLostTheLockToATakeoverNeverUploadsOverTheNewHost(@TempDir Path bobsSharedsaves) throws Exception {
 		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
 		LocalCopy alices = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
@@ -944,6 +975,71 @@ class SessionCoordinatorTest {
 
 		assertEquals(2, bobs.revision());
 		assertEquals("chunks with Alice's house", Files.readString(bobs.folder().resolve("region/r.0.0.mca")));
+	}
+
+	@Test
+	void retryingAnUploadWhoseAnswerWasLostFinishesLikeANormalQuit(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
+
+		RetryResult result = coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		assertEquals(3, assertInstanceOf(RetryResult.Uploaded.class, result).current().revision());
+		assertEquals("chunks with Alice's house", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		assertEquals(List.of(), unmergedBackups(shared.id()));
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+		assertEquals(WorldStatus.FREE, friend(bobsSharedsaves).listSharedWorlds().getFirst().status());
+		assertEquals(new LocalCopy(local.folder(), 3, false), coordinator().localCopy(shared.id()).orElseThrow());
+		assertEquals(List.of(), coordinator().pendingUploads());
+	}
+
+	@Test
+	void aSessionCanQuitAfterAPeriodicUploadWhoseAnswerWasLost() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().periodicUpload(shared.id(),
+				folder -> WorldZip.copyForUpload(local.folder(), folder), ProgressListener.NONE));
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+
+		WorldMetadata uploaded = coordinator().quit(shared.id(), ProgressListener.NONE);
+
+		assertEquals(3, uploaded.revision());
+		assertEquals("chunks with Alice's house", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void playAfterACrashKeepsProgressMadeSinceAPeriodicUploadWhoseAnswerWasLost() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().periodicUpload(shared.id(),
+				folder -> WorldZip.copyForUpload(local.folder(), folder), ProgressListener.NONE));
+		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
+		// The game crashes, and Alice presses Play again.
+
+		PlayResult.Ready resumed = assertInstanceOf(PlayResult.Ready.class, coordinator().play(shared.id(), ProgressListener.NONE));
+
+		assertEquals(Optional.empty(), resumed.unmergedBackup());
+		assertEquals(2, resumed.localCopy().revision());
+		assertEquals("chunks with Alice's house", Files.readString(local.folder().resolve("region/r.0.0.mca")));
+	}
+
+	@Test
+	void leavingKeepsTheLockWhenTheOnlyNewerRevisionIsThisLocalCopysOwn() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		cloud.dropConnectionAfterNextReplace();
+		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
+
+		coordinator().leaveWithoutPlaying(shared.id());
+
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+		assertEquals(List.of(shared.id()), coordinator().pendingUploads());
 	}
 
 	@Test
