@@ -1,5 +1,6 @@
 package net.aii3n.worldgdrivesync.session;
 
+import net.aii3n.worldgdrivesync.io.AtomicFile;
 import net.aii3n.worldgdrivesync.settings.Settings;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -566,6 +567,23 @@ class SessionCoordinatorTest {
 		assertEquals("Alice", assertInstanceOf(PlayResult.Refused.class, result).heldBy().hostName());
 		assertEquals(Optional.empty(), bob.localCopy(shared.id()));
 		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void takeoverIsRefusedIfAHeartbeatLandsBetweenTheStaleCheckAndTheDelete(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		// Bob's Takeover finds the Lock Stale; Alice's Heartbeat resumes just before it reads the Lock again.
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_READ,
+				() -> cloud.beforeNext(InMemoryCloudStore.Call.LOCK_READ, () -> coordinator().heartbeat(shared.id())));
+
+		PlayResult result = bob.takeOver(shared.id(), ProgressListener.NONE);
+
+		assertEquals("Alice", assertInstanceOf(PlayResult.Refused.class, result).heldBy().hostName());
+		assertEquals(List.of("Alice"), cloud.lockHolders(shared.id()));
+		assertEquals(Optional.empty(), bob.localCopy(shared.id()));
 	}
 
 	@Test
@@ -1150,6 +1168,36 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void aShareWhoseUploadFailsLeavesNoWorldInTheCloud() throws Exception {
+		cloud.failUploads();
+
+		assertThrows(IOException.class, () -> coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE));
+
+		assertEquals(0, cloud.worldCount());
+	}
+
+	@Test
+	void aShareThatCannotKeepItsLocalCopyLeavesNoWorldInTheCloud() throws Exception {
+		// Something already sits where the first cloud world's Local Copy would go.
+		write(sharedsaves.resolve("world-1/level.dat"), "in the way");
+
+		assertThrows(IOException.class, () -> coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE));
+
+		assertEquals(0, cloud.worldCount());
+	}
+
+	@Test
+	void aFailedCleanupDoesNotHideWhySharingFailed() throws Exception {
+		cloud.failUploads();
+		cloud.failWorldDeletes();
+
+		IOException failure = assertThrows(IOException.class,
+				() -> coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE));
+
+		assertEquals("Network down (simulated)", failure.getMessage());
+	}
+
+	@Test
 	void sharingReportsUploadProgressUpToTheWholeZip() throws Exception {
 		List<long[]> uploading = new ArrayList<>();
 
@@ -1172,6 +1220,40 @@ class SessionCoordinatorTest {
 
 		assertFalse(cloud.currentSaveEntries(shared.id()).containsKey("session.lock"));
 		assertFalse(Files.exists(coordinator().localCopy(shared.id()).orElseThrow().folder().resolve("session.lock")));
+	}
+
+	// --- Leftovers of a record write ---
+
+	@Test
+	void aTempFileLeftByARecordWriteCutShortIsNotUploaded() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		leaveATempFileOfARecordWrite(local.folder());
+
+		coordinator().quit(shared.id(), ProgressListener.NONE);
+
+		assertEquals(Map.of("level.dat", "level data", "region/r.0.0.mca", "chunks"), cloud.currentSaveEntries(shared.id()));
+	}
+
+	/** What a game killed partway through writing the Local Copy's record leaves behind. */
+	private static void leaveATempFileOfARecordWrite(Path worldFolder) throws IOException {
+		Path record = worldFolder.resolve("world-gdrive-sync.properties");
+		String contents = Files.readString(record);
+		List<Path> before = entriesOf(worldFolder);
+		List<Path> temps = new ArrayList<>();
+		AtomicFile.write(record, out -> {
+			temps.addAll(entriesOf(worldFolder));
+			temps.removeAll(before);
+			out.write(contents);
+		});
+		assertEquals(1, temps.size(), "the write's temp file");
+		Files.writeString(temps.getFirst(), "revi");
+	}
+
+	private static List<Path> entriesOf(Path folder) throws IOException {
+		try (Stream<Path> files = Files.list(folder)) {
+			return files.toList();
+		}
 	}
 
 	// --- Local-only Data ---
