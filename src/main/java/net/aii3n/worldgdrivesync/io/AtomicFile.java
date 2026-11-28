@@ -11,6 +11,8 @@ import java.nio.file.attribute.PosixFilePermissions;
 
 /** Writes small text files so that a crash or failure partway through never leaves them half-written. */
 public final class AtomicFile {
+	private static final String TEMP_SUFFIX = ".tmp";
+
 	private AtomicFile() {
 	}
 
@@ -33,10 +35,18 @@ public final class AtomicFile {
 		write(file, contents, true);
 	}
 
+	/**
+	 * Whether {@code name} is that of a temp file made by writing the file named {@code fileName}. One
+	 * stays behind in that file's folder if the game is killed partway through the write.
+	 */
+	public static boolean isTempFileOf(String name, String fileName) {
+		return name.startsWith(fileName) && name.endsWith(TEMP_SUFFIX);
+	}
+
 	private static void write(Path file, Contents contents, boolean ownerOnly) throws IOException {
 		Path folder = file.toAbsolutePath().getParent();
 		Files.createDirectories(folder);
-		Path temp = Files.createTempFile(folder, file.getFileName().toString(), ".tmp");
+		Path temp = Files.createTempFile(folder, file.getFileName().toString(), TEMP_SUFFIX);
 		try {
 			if (ownerOnly) restrictToOwner(temp); // before the secret is written into it
 			try (Writer out = Files.newBufferedWriter(temp, StandardCharsets.UTF_8)) {
