@@ -33,6 +33,7 @@ final class InMemoryCloudStore implements CloudStore {
 	private boolean failLockDeletes;
 	private boolean failLockWrites;
 	private boolean dropConnectionAfterNextReplace;
+	private boolean storeNextLockTwice;
 	private final Map<Call, Hook> hooks = new EnumMap<>(Call.class);
 
 	/** Cloud calls a test can step into with {@link #beforeNext}. */
@@ -63,7 +64,8 @@ final class InMemoryCloudStore implements CloudStore {
 		final String name;
 		WorldMetadata metadata;
 		byte[] currentSave;
-		final Map<String, Lock> locks = new LinkedHashMap<>();
+		/** Oldest first. Like Drive's Lock files, one player may have more than one. */
+		final List<Lock> locks = new ArrayList<>();
 		final Map<String, StoredBackup> backups = new LinkedHashMap<>();
 		final List<CurrentSave> history = new ArrayList<>();
 
@@ -95,7 +97,7 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	private static void recordCurrentSave(Folder folder, Change change) {
-		folder.history.add(new CurrentSave(change, folder.metadata.revision(), entries(folder.currentSave), List.copyOf(folder.locks.keySet())));
+		folder.history.add(new CurrentSave(change, folder.metadata.revision(), entries(folder.currentSave), folder.locks.stream().map(Lock::hostId).distinct().toList()));
 	}
 
 	// --- CloudStore ---
@@ -215,24 +217,38 @@ final class InMemoryCloudStore implements CloudStore {
 	@Override
 	public synchronized List<Lock> readLocks(String worldId) throws IOException {
 		if (failLockReads) throw new IOException("Network down (simulated)");
-		return List.copyOf(folder(worldId).locks.values());
+		return List.copyOf(folder(worldId).locks);
 	}
 
 	@Override
 	public synchronized void writeLock(String worldId, Lock lock) throws IOException {
 		runHook(Call.LOCK_WRITE);
 		if (failLockWrites) throw new IOException("Network down (simulated)");
-		folder(worldId).locks.put(lock.hostId(), lock);
+		List<Lock> locks = folder(worldId).locks;
+		if (replaceOldest(locks, lock)) return;
+		locks.add(lock);
+		if (storeNextLockTwice) {
+			storeNextLockTwice = false;
+			locks.add(lock);
+		}
 	}
 
 	@Override
 	public synchronized boolean refreshLock(String worldId, Lock lock) throws IOException {
 		runHook(Call.LOCK_WRITE);
 		if (failLockWrites) throw new IOException("Network down (simulated)");
-		Map<String, Lock> locks = folder(worldId).locks;
-		if (!locks.containsKey(lock.hostId())) return false;
-		locks.put(lock.hostId(), lock);
-		return true;
+		return replaceOldest(folder(worldId).locks, lock);
+	}
+
+	/** Puts {@code lock} in the place of its player's oldest Lock; false if they have none. */
+	private static boolean replaceOldest(List<Lock> locks, Lock lock) {
+		for (int i = 0; i < locks.size(); i++) {
+			if (locks.get(i).hostId().equals(lock.hostId())) {
+				locks.set(i, lock);
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private void runHook(Call call) throws IOException {
@@ -244,9 +260,13 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	@Override
-	public synchronized void deleteLock(String worldId, String hostId) throws IOException {
+	public synchronized boolean deleteLock(String worldId, String hostId) throws IOException {
 		if (failLockDeletes) throw new IOException("Network down (simulated)");
-		folder(worldId).locks.remove(hostId);
+		List<Lock> locks = folder(worldId).locks;
+		// One copy per call, the least CloudStore allows.
+		Optional<Lock> oldest = locks.stream().filter(lock -> lock.hostId().equals(hostId)).findFirst();
+		oldest.ifPresent(locks::remove);
+		return oldest.isPresent();
 	}
 
 	// --- Test controls and inspection ---
@@ -309,6 +329,14 @@ final class InMemoryCloudStore implements CloudStore {
 		failLockDeletes = false;
 	}
 
+	/**
+	 * The next Lock to be created is stored twice, as when the answer to Drive's create request is
+	 * lost and the request is sent again.
+	 */
+	synchronized void storeNextLockTwice() {
+		storeNextLockTwice = true;
+	}
+
 	/** From now on writing or refreshing a Lock fails, like a dropped connection. */
 	void failLockWrites() {
 		failLockWrites = true;
@@ -344,7 +372,7 @@ final class InMemoryCloudStore implements CloudStore {
 
 	/** The names of the players holding a Lock on the world, oldest Lock first. */
 	synchronized List<String> lockHolders(String worldId) {
-		return worlds.get(worldId).locks.values().stream().map(Lock::hostName).toList();
+		return worlds.get(worldId).locks.stream().map(Lock::hostName).toList();
 	}
 
 	/** From now on deleting a Backup fails. */

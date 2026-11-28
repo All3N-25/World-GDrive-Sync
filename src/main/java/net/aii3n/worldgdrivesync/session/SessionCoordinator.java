@@ -190,7 +190,7 @@ public final class SessionCoordinator {
 		Optional<Lock> held = currentLock(worldId);
 		if (held.isPresent() && !held.get().heldBy(me)) {
 			if (!isStale(held.get())) return new PlayResult.Refused(held.get());
-			cloud.deleteLock(worldId, held.get().hostId());
+			deleteLock(worldId, held.get().hostId());
 		}
 		return becomeHost(worldId, held.isPresent() && held.get().heldBy(me), progress);
 	}
@@ -575,7 +575,7 @@ public final class SessionCoordinator {
 			try {
 				synchronized (locksToRelease) {
 					if (locksToRelease.contains(worldId)) {
-						cloud.deleteLock(worldId, me.id());
+						deleteLock(worldId, me.id());
 						locksToRelease.remove(worldId);
 					}
 				}
@@ -652,7 +652,14 @@ public final class SessionCoordinator {
 	private void releaseLock(String worldId) throws IOException {
 		// Forgotten first, so a Heartbeat racing this release can't report the Lock as lost.
 		heldLocks.remove(worldId);
-		cloud.deleteLock(worldId, me.id());
+		deleteLock(worldId, me.id());
+	}
+
+	/** Deletes {@code hostId}'s Lock, every copy of it: they all count as that player's one Lock. */
+	private void deleteLock(String worldId, String hostId) throws IOException {
+		while (cloud.deleteLock(worldId, hostId)) {
+			// The store may hold another copy (see CloudStore.deleteLock).
+		}
 	}
 
 	/**

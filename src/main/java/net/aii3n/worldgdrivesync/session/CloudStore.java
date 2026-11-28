@@ -105,6 +105,12 @@ public interface CloudStore {
 	 */
 	boolean refreshLock(String worldId, Lock lock) throws IOException;
 
-	/** Deletes the Lock of {@code hostId}, if there is one. */
-	void deleteLock(String worldId, String hostId) throws IOException;
+	/**
+	 * Deletes the Lock of {@code hostId}, if there is one. The store may hold it more than once (a
+	 * create that was retried after its answer was lost), and one call may delete only some of those
+	 * copies, so call until it returns false.
+	 *
+	 * @return whether anything was deleted
+	 */
+	boolean deleteLock(String worldId, String hostId) throws IOException;
 }

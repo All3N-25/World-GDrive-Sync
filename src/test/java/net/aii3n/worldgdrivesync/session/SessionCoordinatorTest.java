@@ -601,6 +601,104 @@ class SessionCoordinatorTest {
 		assertEquals(List.of("Carol"), cloud.lockHolders(shared.id()));
 	}
 
+	// --- A Lock stored twice by a retried write ---
+
+	@Test
+	void quittingLeavesNoneOfALockThatWasStoredTwice(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator alice = coordinator();
+		cloud.storeNextLockTwice();
+		alice.play(shared.id(), ProgressListener.NONE);
+		assertEquals(List.of("Alice", "Alice"), cloud.lockHolders(shared.id()));
+
+		alice.quit(shared.id(), ProgressListener.NONE);
+
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+		assertEquals(WorldStatus.FREE, friend(bobsSharedsaves).listSharedWorlds().getFirst().status());
+	}
+
+	@Test
+	void leavingWithoutPlayingLeavesNoneOfALockThatWasStoredTwice() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator alice = coordinator();
+		cloud.storeNextLockTwice();
+		alice.play(shared.id(), ProgressListener.NONE);
+
+		alice.leaveWithoutPlaying(shared.id());
+
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void aPlayThatFailsLeavesNoneOfALockThatWasStoredTwice(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		cloud.storeNextLockTwice();
+		cloud.failDownloads();
+
+		assertThrows(IOException.class, () -> friend(bobsSharedsaves).play(shared.id(), ProgressListener.NONE));
+
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void theNextHeartbeatReleasesEveryCopyOfALockQuitCouldntRelease() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator alice = coordinator();
+		cloud.storeNextLockTwice();
+		alice.play(shared.id(), ProgressListener.NONE);
+		cloud.failLockDeletes();
+		alice.quit(shared.id(), ProgressListener.NONE);
+		cloud.lockDeletesWork();
+
+		alice.heartbeatHeldLocks();
+
+		assertEquals(List.of(), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void heartbeatsKeepALockThatWasStoredTwiceFreshAndHeld(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator alice = coordinator();
+		cloud.storeNextLockTwice();
+		alice.play(shared.id(), ProgressListener.NONE);
+
+		beatEveryMinuteFor(alice, Duration.ofMinutes(10));
+
+		assertEquals(List.of(), alice.heartbeatHeldLocks(), "not reported as lost");
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		assertEquals(new WorldStatus.Hosted("Alice", SHARED_AT), bob.listSharedWorlds().getFirst().status());
+		assertInstanceOf(PlayResult.Refused.class, bob.takeOver(shared.id(), ProgressListener.NONE));
+	}
+
+	@Test
+	void takingOverALockThatWasStoredTwiceReplacesAllOfIt(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		cloud.storeNextLockTwice();
+		coordinator().play(shared.id(), ProgressListener.NONE);
+		clock.advance(Duration.ofMinutes(10));
+
+		PlayResult result = friend(bobsSharedsaves).takeOver(shared.id(), ProgressListener.NONE);
+
+		assertInstanceOf(PlayResult.Ready.class, result);
+		assertEquals(List.of("Bob"), cloud.lockHolders(shared.id()));
+	}
+
+	@Test
+	void aPlayerWhoseLaterLockWasStoredTwiceLosesAndLeavesNoneOfIt(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		SessionCoordinator bob = friend(bobsSharedsaves);
+		// Both saw the world Free. Bob's Lock lands first; Alice's, a moment later, is stored twice.
+		cloud.beforeNext(InMemoryCloudStore.Call.LOCK_WRITE, () -> {
+			bob.play(shared.id(), ProgressListener.NONE);
+			cloud.storeNextLockTwice();
+		});
+
+		PlayResult alicesResult = coordinator().play(shared.id(), ProgressListener.NONE);
+
+		assertEquals("Bob", assertInstanceOf(PlayResult.Refused.class, alicesResult).heldBy().hostName());
+		assertEquals(List.of("Bob"), cloud.lockHolders(shared.id()));
+	}
+
 	// --- Play and quit ---
 
 	@Test
