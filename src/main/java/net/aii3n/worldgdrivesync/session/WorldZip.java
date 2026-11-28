@@ -1,5 +1,7 @@
 package net.aii3n.worldgdrivesync.session;
 
+import net.aii3n.worldgdrivesync.io.AtomicFile;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -7,7 +9,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -15,12 +16,6 @@ import java.util.zip.ZipOutputStream;
 
 /** Packs a world folder into a zip whose entries are relative to the world folder, and copies world folders. */
 public final class WorldZip {
-	/**
-	 * Top-level files never packed or copied: Minecraft's {@code session.lock} (held open while the
-	 * world runs, and unreadable on Windows), and the Local Copy's own record.
-	 */
-	static final Set<String> SKIPPED = Set.of("session.lock", LocalCopyRecord.FILE_NAME);
-
 	/**
 	 * Copies a saved world folder for an upload: leaves out what no upload contains, which is the
 	 * open world's {@code session.lock}, the Local Copy's own record and the Local-only Data.
@@ -45,10 +40,20 @@ public final class WorldZip {
 	private static List<Path> worldFiles(Path worldFolder) throws IOException {
 		try (Stream<Path> walk = Files.walk(worldFolder)) {
 			return walk.filter(Files::isRegularFile)
-					.filter(f -> !(f.getParent().equals(worldFolder) && SKIPPED.contains(f.getFileName().toString())))
+					.filter(f -> !(f.getParent().equals(worldFolder) && isSkippedAtTopLevel(f.getFileName().toString())))
 					.sorted()
 					.toList();
 		}
+	}
+
+	/**
+	 * Top-level files never packed or copied: Minecraft's {@code session.lock} (held open while the
+	 * world runs, and unreadable on Windows), the Local Copy's own record, and any temp file left by a
+	 * write of that record.
+	 */
+	private static boolean isSkippedAtTopLevel(String name) {
+		return name.equals("session.lock") || name.equals(LocalCopyRecord.FILE_NAME)
+				|| AtomicFile.isTempFileOf(name, LocalCopyRecord.FILE_NAME);
 	}
 
 	private static List<Path> filesToUpload(Path worldFolder) throws IOException {
