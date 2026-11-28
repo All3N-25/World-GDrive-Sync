@@ -133,7 +133,8 @@ public final class SessionCoordinator {
 	/**
 	 * Shares an existing singleplayer world: uploads it into a new cloud folder as Revision 1 and
 	 * keeps a Local Copy of it. {@code worldFolder} is only read; the original world stays where it
-	 * is. If anything fails, the world is not listed and no Local Copy is left behind.
+	 * is. If anything fails, the world is not listed, no Local Copy is
+	 * left behind, and the new cloud folder is deleted again (best effort).
 	 *
 	 * @param worldFolder a world folder that isn't open in the game
 	 * @param name        the name everyone sees on the Shared Worlds screen
@@ -150,15 +151,30 @@ public final class SessionCoordinator {
 			long size = Files.size(zip);
 
 			CloudWorld world = cloud.createWorld(name);
-			WorldMetadata metadata = new WorldMetadata(1, clock.instant());
-			cloud.uploadCurrentSave(world.id(), zip, metadata, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+			boolean shared = false;
+			try {
+				WorldMetadata metadata = new WorldMetadata(1, clock.instant());
+				cloud.uploadCurrentSave(world.id(), zip, metadata, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 
-			new LocalCopyRecord(metadata.revision()).write(staging);
-			Files.move(staging, localCopies.resolve(world.id()));
-			return sharedWorld(world, metadata, WorldStatus.FREE);
+				new LocalCopyRecord(metadata.revision()).write(staging);
+				Files.move(staging, localCopies.resolve(world.id()));
+				shared = true;
+				return sharedWorld(world, metadata, WorldStatus.FREE);
+			} finally {
+				if (!shared) deleteUnsharedWorld(world.id());
+			}
 		} finally {
 			Files.deleteIfExists(zip);
 			deleteRecursively(staging);
+		}
+	}
+
+	/** Best effort, so a failure here doesn't hide why sharing failed; it only leaves the folder behind. */
+	private void deleteUnsharedWorld(String worldId) {
+		try {
+			cloud.deleteWorld(worldId);
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete the cloud folder of " + worldId + " after sharing failed", e);
 		}
 	}
 

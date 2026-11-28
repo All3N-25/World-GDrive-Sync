@@ -55,6 +55,7 @@ final class InMemoryCloudStore implements CloudStore {
 		void run() throws IOException;
 	}
 	private boolean failBackupDeletes;
+	private boolean failWorldDeletes;
 	private Runnable afterChunkSent = () -> {
 	};
 
@@ -114,6 +115,13 @@ final class InMemoryCloudStore implements CloudStore {
 		String id = "world-" + nextId++;
 		worlds.put(id, new Folder(name));
 		return new CloudWorld(id, name);
+	}
+
+	@Override
+	public synchronized void deleteWorld(String worldId) throws IOException {
+		if (failWorldDeletes) throw new IOException("Couldn't delete the folder (simulated)");
+		folder(worldId);
+		worlds.remove(worldId);
 	}
 
 	@Override
@@ -353,6 +361,11 @@ final class InMemoryCloudStore implements CloudStore {
 	/** From now on deleting a Backup fails. */
 	void failBackupDeletes() {
 		failBackupDeletes = true;
+	}
+
+	/** From now on deleting a world folder fails. */
+	void failWorldDeletes() {
+		failWorldDeletes = true;
 	}
 
 	synchronized int worldCount() {
