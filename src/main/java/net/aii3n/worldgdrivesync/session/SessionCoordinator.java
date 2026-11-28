@@ -164,8 +164,8 @@ public final class SessionCoordinator {
 	/**
 	 * Shares an existing singleplayer world: uploads it into a new cloud folder as Revision 1 and
 	 * keeps a Local Copy of it. {@code worldFolder} is only read; the original world stays where it
-	 * is. If anything fails, the world is not listed, no Local Copy is
-	 * left behind, and the new cloud folder is deleted again (best effort).
+	 * is. If anything fails, the world is not listed, no Local Copy is left behind, and the new cloud
+	 * folder is deleted again (best effort).
 	 *
 	 * @param worldFolder a world folder that isn't open in the game
 	 * @param name        the name everyone sees on the Shared Worlds screen
@@ -180,9 +180,7 @@ public final class SessionCoordinator {
 			WorldZip.zip(staging, zip, progress);
 			long size = Files.size(zip);
 
-			SharedWorld shared = uploadIfItFits(() -> name, size, () -> uploadAsNewWorld(name, staging, zip, size, progress));
-			warnIfNearlyFull(size);
-			return shared;
+			return uploadIfItFits(() -> name, size, () -> uploadAsNewWorld(name, staging, zip, size, progress));
 		} finally {
 			LocalCopyFolders.deleteLeftover(zip);
 			LocalCopyFolders.deleteLeftover(staging);
@@ -206,7 +204,10 @@ public final class SessionCoordinator {
 		}
 	}
 
-	/** One upload of a zip to the cloud store, with whatever has to happen only if it may start. */
+	/**
+	 * One upload of a zip to the cloud store, with whatever has to happen only if it may start and
+	 * whatever has to happen before anyone is warned that the account is nearly full.
+	 */
 	@FunctionalInterface
 	private interface Sending<T> {
 		T send() throws IOException;
@@ -215,7 +216,8 @@ public final class SessionCoordinator {
 	/**
 	 * Runs {@code sending}, an upload of {@code size} bytes, unless the account's free space is
 	 * smaller than that: then nothing is sent and nothing in the cloud changes. If the free space
-	 * can't be read, the upload is tried and the cloud store's answer decides.
+	 * can't be read, the upload is tried and the cloud store's answer decides. After a successful
+	 * one, warns if it left the account nearly full (see {@link #whenNearlyFull}).
 	 *
 	 * @param worldName asked for only if the upload doesn't fit
 	 * @throws NotEnoughSpaceException if it doesn't fit, by this check or by the cloud store's refusal
@@ -223,14 +225,17 @@ public final class SessionCoordinator {
 	private <T> T uploadIfItFits(Supplier<String> worldName, long size, Sending<T> sending) throws IOException {
 		OptionalLong free = freeSpace();
 		if (free.isPresent() && size > free.getAsLong()) throw new NotEnoughSpaceException(worldName.get(), size, free, null);
+		T sent;
 		try {
-			return sending.send();
+			sent = sending.send();
 		} catch (StorageFullException refused) {
 			// Filled up meanwhile. A free space the zip would fit in is out of date, so it isn't quoted.
 			OptionalLong freeAfterRefusal = freeSpace();
 			if (freeAfterRefusal.isPresent() && freeAfterRefusal.getAsLong() >= size) freeAfterRefusal = OptionalLong.empty();
 			throw new NotEnoughSpaceException(worldName.get(), size, freeAfterRefusal, refused);
 		}
+		warnIfNearlyFull(size);
+		return sent;
 	}
 
 	/** The name everyone sees for a world, as well as it can be told, for a message about it. */
@@ -448,12 +453,13 @@ public final class SessionCoordinator {
 			Instant now = clock.instant();
 			CrashedSession session = new CrashedSession(me.id(), me.name(), record.sessionStartedAt().orElse(now));
 			BackupLabel label = new BackupLabel(record.revision(), now, Optional.of(session));
-			Backup backup = uploadIfItFits(() -> worldName(worldId), size,
-					() -> cloud.uploadBackup(worldId, zip, label, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size)));
-			new LocalCopyRecord(record.revision()).write(folder);
-			pruneBackups(worldId);
-			warnIfNearlyFull(size);
-			return backup;
+			return uploadIfItFits(() -> worldName(worldId), size, () -> {
+				Backup backup = cloud.uploadBackup(worldId, zip, label,
+						sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+				new LocalCopyRecord(record.revision()).write(folder);
+				pruneBackups(worldId);
+				return backup;
+			});
 		} finally {
 			LocalCopyFolders.deleteLeftover(zip);
 		}
@@ -513,25 +519,21 @@ public final class SessionCoordinator {
 	 * Save-and-quit: uploads the Local Copy as the new Current Save, then releases the Lock. Call it
 	 * once the game has closed the world, so everything is on disk. The Lock is released only after
 	 * the upload succeeds; if releasing it fails, the upload still counts and {@link
-	 * #heartbeatHeldLocks} keeps trying to release it. If the upload fails, this throws, the Lock is kept, and the Local Copy becomes a
-	 * Pending Upload (see {@link #retryPendingUpload}). It also fails that way if this player no
-	 * longer holds the Lock (a friend Took Over): the Local Copy is then never uploaded over the new
-	 * Host's world, and becomes an Unmerged Backup later instead.
+	 * #heartbeatHeldLocks} keeps trying to release it. If the upload fails, this throws, the Lock is
+	 * kept, and the Local Copy becomes a Pending Upload (see {@link #retryPendingUpload}). It also
+	 * fails that way if this player no longer holds the Lock (a friend Took Over): the Local Copy is
+	 * then never uploaded over the new Host's world, and becomes an Unmerged Backup later instead.
 	 *
 	 * @return the new Current Save's metadata
 	 */
 	public WorldMetadata quit(String worldId, ProgressListener progress) throws IOException {
 		LocalCopy local = localCopy(worldId).orElseThrow(() -> new IOException("No Local Copy of " + worldId + " to upload"));
-		Uploaded uploaded;
 		try {
-			uploaded = upload(worldId, local.folder(), true, progress);
+			return upload(worldId, local.folder(), true, progress);
 		} catch (IOException | RuntimeException e) {
 			markPendingUpload(local.folder(), e);
 			throw e;
 		}
-		releaseLockOrRetryLater(worldId);
-		warnIfNearlyFull(uploaded.size());
-		return uploaded.current();
 	}
 
 	/** Releases the Lock once the progress it protected is in the cloud; a failure is retried by Heartbeats. */
@@ -556,9 +558,10 @@ public final class SessionCoordinator {
 	 * past the Local Copy's Revision (someone Took Over and uploaded), the Pending Upload is kept as
 	 * an Unmerged Backup instead, this player's Lock is released if they still hold one, and the
 	 * Local Copy is replaced with the newer Revision. An upload of this Local Copy whose answer was
-	 * lost isn't someone else's: if the copy has changed since, this uploads on top of it. If someone else holds the Lock but hasn't
-	 * uploaded yet, this throws and the Pending Upload is kept. If nobody holds the Lock (it was
-	 * Taken Over and given up), this player takes it again for the upload.
+	 * lost isn't someone else's: if the copy has changed since, this uploads on top of it. If someone
+	 * else holds the Lock but hasn't uploaded yet, this throws and the Pending Upload is kept. If
+	 * nobody holds the Lock (it was Taken Over and given up), this player takes it again for the
+	 * upload.
 	 */
 	public RetryResult retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
 		Path folder = folders.of(worldId);
@@ -644,16 +647,10 @@ public final class SessionCoordinator {
 		Path folder = folders.newStagingFolder();
 		try {
 			copier.copyTo(folder);
-			Uploaded uploaded = upload(worldId, folder, false, progress);
-			warnIfNearlyFull(uploaded.size());
-			return uploaded.current();
+			return upload(worldId, folder, false, progress);
 		} finally {
 			LocalCopyFolders.deleteLeftover(folder);
 		}
-	}
-
-	/** A new Current Save, and the size of its zip in bytes. */
-	private record Uploaded(WorldMetadata current, long size) {
 	}
 
 	/**
@@ -664,11 +661,12 @@ public final class SessionCoordinator {
 	 * @param worldFolder the world to upload, already saved to disk and not being written to: the
 	 *                    Local Copy itself after the world has closed, or a copy of the open world
 	 * @param endsSession whether this is the session's final upload: the Local Copy then no longer
-	 *                    counts as having unsaved progress. A periodic upload leaves that as it is.
+	 *                    counts as having unsaved progress, and the Lock is released. A periodic
+	 *                    upload leaves both as they are.
 	 * @return the new Current Save
 	 * @throws NotEnoughSpaceException if it doesn't fit in the account's free space
 	 */
-	private Uploaded upload(String worldId, Path worldFolder, boolean endsSession, ProgressListener progress) throws IOException {
+	private WorldMetadata upload(String worldId, Path worldFolder, boolean endsSession, ProgressListener progress) throws IOException {
 		Path zip = folders.newStagingZip();
 		try {
 			String contents = WorldZip.zip(worldFolder, zip, progress);
@@ -680,20 +678,21 @@ public final class SessionCoordinator {
 			ensureStillHost(worldId, previous, local);
 
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
-			uploadIfItFits(() -> worldName(worldId), size, () -> {
+			return uploadIfItFits(() -> worldName(worldId), size, () -> {
 				// Written before sending: the upload may be stored although its answer never arrives.
 				if (local.isPresent()) {
 					local.get().withSentUpload(Optional.of(new LocalCopyRecord.SentUpload(next, contents))).write(localFolder);
 				}
-				return cloud.replaceCurrentSave(worldId, zip, next, BackupLabel.of(previous),
+				cloud.replaceCurrentSave(worldId, zip, next, BackupLabel.of(previous),
 						sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+				LocalCopyRecord uploaded = LocalCopyRecord.read(localFolder).orElse(new LocalCopyRecord(next.revision()))
+						.withRevision(next.revision()).withPendingUpload(false).withSentUpload(Optional.empty());
+				if (endsSession) uploaded = uploaded.withSessionStartedAt(Optional.empty());
+				uploaded.write(localFolder);
+				pruneBackups(worldId);
+				if (endsSession) releaseLockOrRetryLater(worldId);
+				return next;
 			});
-			LocalCopyRecord uploaded = LocalCopyRecord.read(localFolder).orElse(new LocalCopyRecord(next.revision()))
-					.withRevision(next.revision()).withPendingUpload(false).withSentUpload(Optional.empty());
-			if (endsSession) uploaded = uploaded.withSessionStartedAt(Optional.empty());
-			uploaded.write(localFolder);
-			pruneBackups(worldId);
-			return new Uploaded(next, size);
 		} finally {
 			LocalCopyFolders.deleteLeftover(zip);
 		}
