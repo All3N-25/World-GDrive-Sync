@@ -5,7 +5,6 @@ import com.google.gson.JsonParser;
 import net.aii3n.worldgdrivesync.google.GoogleAccount;
 import net.aii3n.worldgdrivesync.google.GoogleAuthException;
 import net.aii3n.worldgdrivesync.session.CloudStore.BytesProgress;
-import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
 import net.aii3n.worldgdrivesync.session.StorageFullException;
 
 import java.io.ByteArrayOutputStream;
@@ -172,22 +171,17 @@ final class DriveHttp {
 	 * failure. Drive creates the file only once the upload completes.
 	 *
 	 * @return Drive's answer for the finished file (its {@code id})
-	 * @throws NotEnoughSpaceException if Drive refuses it because its storage is full; not retried
 	 */
 	JsonObject uploadNewFile(JsonObject metadata, Path zip, LongConsumer bytesSent) throws IOException {
 		long size = Files.size(zip);
-		try {
-			HttpResponse<byte[]> started = send(token -> authorized(uploadApi + "/files?uploadType=resumable&fields=id", token)
-					.header("Content-Type", "application/json; charset=UTF-8")
-					.header("X-Upload-Content-Type", "application/zip")
-					.header("X-Upload-Content-Length", Long.toString(size))
-					.POST(HttpRequest.BodyPublishers.ofString(metadata.toString())));
-			URI session = started.headers().firstValue("Location").map(URI::create)
-					.orElseThrow(() -> new IOException("Drive didn't start the upload"));
-			return new ResumableUpload(session, zip, size, bytesSent).run();
-		} catch (StorageFullException e) {
-			throw new NotEnoughSpaceException(size, e);
-		}
+		HttpResponse<byte[]> started = send(token -> authorized(uploadApi + "/files?uploadType=resumable&fields=id", token)
+				.header("Content-Type", "application/json; charset=UTF-8")
+				.header("X-Upload-Content-Type", "application/zip")
+				.header("X-Upload-Content-Length", Long.toString(size))
+				.POST(HttpRequest.BodyPublishers.ofString(metadata.toString())));
+		URI session = started.headers().firstValue("Location").map(URI::create)
+				.orElseThrow(() -> new IOException("Drive didn't start the upload"));
+		return new ResumableUpload(session, zip, size, bytesSent).run();
 	}
 
 	/** Streams a large file to {@code target}, reporting bytes as they arrive; retried from the start on failure. */

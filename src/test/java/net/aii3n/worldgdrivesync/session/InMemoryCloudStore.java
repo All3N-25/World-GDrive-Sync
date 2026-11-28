@@ -209,7 +209,7 @@ final class InMemoryCloudStore implements CloudStore {
 	/** "Sends" a zip in small chunks, failing partway when uploads are set to fail. */
 	private byte[] send(Path zip, LongConsumer bytesSent) throws IOException {
 		byte[] bytes = Files.readAllBytes(zip);
-		if (refuseUploadsAsFull) throw new NotEnoughSpaceException(bytes.length, null);
+		if (refuseUploadsAsFull) throw new StorageFullException(null);
 		for (int sent = 0; sent < bytes.length; ) {
 			if (failUploads) throw new IOException("Network down (simulated)");
 			sent = Math.min(bytes.length, sent + CHUNK);

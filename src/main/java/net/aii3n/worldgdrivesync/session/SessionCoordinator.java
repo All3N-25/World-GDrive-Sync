@@ -321,11 +321,11 @@ public final class SessionCoordinator {
 		if (free.isPresent() && size > free.getAsLong()) throw new NotEnoughSpaceException(worldName.get(), size, free, null);
 		try {
 			return sending.send();
-		} catch (NotEnoughSpaceException | StorageFullException refused) {
+		} catch (StorageFullException refused) {
 			// Filled up meanwhile. A free space the zip would fit in is out of date, so it isn't quoted.
-			OptionalLong now = freeSpace();
-			if (now.isPresent() && now.getAsLong() >= size) now = OptionalLong.empty();
-			throw new NotEnoughSpaceException(worldName.get(), size, now, refused);
+			OptionalLong freeAfterRefusal = freeSpace();
+			if (freeAfterRefusal.isPresent() && freeAfterRefusal.getAsLong() >= size) freeAfterRefusal = OptionalLong.empty();
+			throw new NotEnoughSpaceException(worldName.get(), size, freeAfterRefusal, refused);
 		}
 	}
 

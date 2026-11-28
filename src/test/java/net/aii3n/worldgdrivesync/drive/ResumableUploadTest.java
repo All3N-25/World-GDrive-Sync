@@ -4,7 +4,6 @@ import com.google.gson.JsonObject;
 import net.aii3n.worldgdrivesync.google.GoogleAccount;
 import net.aii3n.worldgdrivesync.google.GoogleEndpoints;
 import net.aii3n.worldgdrivesync.google.OAuthClient;
-import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
 import net.aii3n.worldgdrivesync.session.StorageFullException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -82,23 +81,21 @@ class ResumableUploadTest {
 	}
 
 	@Test
-	void anUploadAFullDriveWontStartIsNotEnoughSpaceAndIsNotRetried() {
+	void anUploadAFullDriveWontStartSaysItIsFullAndIsNotRetried() {
 		fake.refusesToStart = storageFull();
 
-		NotEnoughSpaceException refused = assertThrows(NotEnoughSpaceException.class, this::upload);
+		assertThrows(StorageFullException.class, this::upload);
 
-		assertEquals(10, refused.needed());
 		assertEquals(1, fake.starts.get());
 		assertEquals(List.of(), pauses);
 	}
 
 	@Test
-	void anUploadTheDriveFillsUpUnderIsNotEnoughSpaceAndIsNotRetried() {
+	void anUploadTheDriveFillsUpUnderSaysItIsFullAndIsNotRetried() {
 		fake.otherwise = storageFull();
 
-		NotEnoughSpaceException refused = assertThrows(NotEnoughSpaceException.class, this::upload);
+		assertThrows(StorageFullException.class, this::upload);
 
-		assertEquals(10, refused.needed());
 		assertEquals(1, fake.puts.size());
 		assertEquals(List.of(), pauses);
 	}

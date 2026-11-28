@@ -10,11 +10,6 @@ public final class NotEnoughSpaceException extends IOException {
 	private final long needed;
 	private final Long free;
 
-	/** A cloud store's refusal of an upload of {@code needed} bytes for want of room. */
-	public NotEnoughSpaceException(long needed, Throwable cause) {
-		this("this world", needed, OptionalLong.empty(), cause);
-	}
-
 	NotEnoughSpaceException(String worldName, long needed, OptionalLong free, Throwable cause) {
 		super("Not enough Google Drive space to upload " + worldName + ": needs " + ByteSize.format(needed)
 				+ (free.isPresent() ? ", " + ByteSize.format(free.getAsLong()) + " free" : "")
