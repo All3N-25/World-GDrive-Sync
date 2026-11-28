@@ -1826,7 +1826,7 @@ class SessionCoordinatorTest {
 		assertEquals(2, cloud.metadata(shared.id()).revision());
 	}
 
-	private SessionCoordinator coordinatorMovingWith(SessionCoordinator.FolderMover mover) {
+	private SessionCoordinator coordinatorMovingWith(LocalCopyFolders.Mover mover) {
 		return new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS, mover);
 	}
 

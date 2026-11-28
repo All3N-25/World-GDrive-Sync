@@ -2,27 +2,19 @@ package net.aii3n.worldgdrivesync.session;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.io.UncheckedIOException;
-import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
-import java.util.stream.Stream;
 
 import net.aii3n.worldgdrivesync.settings.Settings;
 
@@ -37,23 +29,15 @@ import net.aii3n.worldgdrivesync.settings.Settings;
  * alongside any other call.
  */
 public final class SessionCoordinator {
-	private static final String STAGING_PREFIX = ".wgds-";
-	/** A folder holding the Local Copy a swap moved aside, in a folder named by its world's id. */
-	private static final String ASIDE_PREFIX = STAGING_PREFIX + "aside-";
-	/** A moved-aside copy on its way to being deleted. */
-	private static final String TRASH_PREFIX = STAGING_PREFIX + "trash-";
-	/** Where swaps used to move the old copy, inside a {@code .wgds-*} folder: its world isn't known. */
-	private static final String UNKNOWN_WORLDS_COPY = "old";
 	/** How long to wait after writing a Lock for a simultaneous one to show up in the cloud store. */
 	private static final Duration LOCK_SETTLE_TIME = Duration.ofSeconds(3);
 	private static final System.Logger LOGGER = System.getLogger(SessionCoordinator.class.getName());
 
 	private final CloudStore cloud;
 	private final SessionClock clock;
-	private final Path localCopies;
+	private final LocalCopyFolders folders;
 	private final Player me;
 	private final Supplier<Settings> settings;
-	private final FolderMover mover;
 	/** The worlds this player took the Lock on through this coordinator and hasn't released. */
 	private final Set<String> heldLocks = ConcurrentHashMap.newKeySet();
 	/**
@@ -85,19 +69,13 @@ public final class SessionCoordinator {
 	}
 
 	/** As the public constructor, with {@code mover} swapping Local Copies, so a test can make a swap fail. */
-	SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me, Supplier<Settings> settings, FolderMover mover) {
+	SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me, Supplier<Settings> settings,
+			LocalCopyFolders.Mover mover) {
 		this.cloud = cloud;
 		this.clock = clock;
-		this.localCopies = localCopies;
+		this.folders = new LocalCopyFolders(localCopies, mover);
 		this.me = me;
 		this.settings = settings;
-		this.mover = mover;
-	}
-
-	/** Renames a folder to a path where nothing exists. */
-	@FunctionalInterface
-	interface FolderMover {
-		void move(Path from, Path to) throws IOException;
 	}
 
 	/**
@@ -155,79 +133,12 @@ public final class SessionCoordinator {
 	 * @throws IOException if the Local Copy directory can't be listed
 	 */
 	public void recoverLocalCopiesAndDeleteLeftovers() throws IOException {
-		if (!Files.isDirectory(localCopies)) return;
-		List<Path> leftovers;
-		try (Stream<Path> entries = Files.list(localCopies)) {
-			leftovers = entries.filter(entry -> entry.getFileName().toString().startsWith(STAGING_PREFIX)).toList();
-		}
-		Map<String, List<MovedAside>> movedAside = new HashMap<>();
-		for (Path leftover : leftovers) {
-			String name = leftover.getFileName().toString();
-			if (name.startsWith(ASIDE_PREFIX) && Files.isDirectory(leftover)) {
-				findMovedAside(leftover, movedAside);
-			} else if (name.startsWith(TRASH_PREFIX) || !Files.isDirectory(leftover.resolve(UNKNOWN_WORLDS_COPY))) {
-				deleteLeftover(leftover);
-			}
-		}
-		movedAside.forEach(this::restoreOrDiscard);
-	}
-
-	/** An old Local Copy a swap moved aside, with the Revision its record says it is. */
-	private record MovedAside(Path folder, int revision) {
-	}
-
-	/**
-	 * Adds the copies in a move-aside folder that have a readable record to {@code found}, by world
-	 * id. Deletes the folder if there is no copy in it at all.
-	 */
-	private static void findMovedAside(Path aside, Map<String, List<MovedAside>> found) {
-		List<Path> copies;
-		try (Stream<Path> entries = Files.list(aside)) {
-			copies = entries.filter(Files::isDirectory).toList();
-		} catch (IOException | UncheckedIOException e) {
-			LOGGER.log(System.Logger.Level.WARNING, "Couldn't look for an old Local Copy in " + aside, e);
-			return;
-		}
-		if (copies.isEmpty()) deleteLeftover(aside);
-		for (Path copy : copies) {
-			Optional<LocalCopyRecord> record = LocalCopyRecord.read(copy);
-			if (record.isEmpty()) {
-				LOGGER.log(System.Logger.Level.WARNING, "Keeping " + copy + ": it has no readable record");
-				continue;
-			}
-			found.computeIfAbsent(copy.getFileName().toString(), worldId -> new ArrayList<>())
-					.add(new MovedAside(copy, record.get().revision()));
-		}
-	}
-
-	/** Settles the moved-aside copies of one world: see {@link #recoverLocalCopiesAndDeleteLeftovers}. */
-	private void restoreOrDiscard(String worldId, List<MovedAside> copies) {
-		Path folder = localCopies.resolve(worldId);
-		List<MovedAside> spare = new ArrayList<>(copies);
-		if (Files.notExists(folder, LinkOption.NOFOLLOW_LINKS)) {
-			MovedAside newest = Collections.max(copies, Comparator.comparingInt(MovedAside::revision));
-			try {
-				synchronized (LocalCopyRecord.class) { // not while a listing reads the record
-					mover.move(newest.folder(), folder);
-				}
-			} catch (IOException | RuntimeException e) {
-				LOGGER.log(System.Logger.Level.WARNING, "Couldn't put the Local Copy back; it is in " + newest.folder(), e);
-				return;
-			}
-			LOGGER.log(System.Logger.Level.INFO, "Put the old Local Copy of " + worldId + " back");
-			deleteIfEmpty(newest.folder().getParent());
-			spare.remove(newest);
-		}
-		if (LocalCopyRecord.read(folder).isEmpty()) {
-			LOGGER.log(System.Logger.Level.WARNING, "Keeping the old Local Copy of " + worldId + ": " + folder + " isn't a Local Copy");
-			return;
-		}
-		spare.forEach(copy -> discard(copy.folder()));
+		folders.recoverAndDeleteLeftovers();
 	}
 
 	/** This player's Local Copy of a Shared World, if they have one. */
 	public Optional<LocalCopy> localCopy(String worldId) {
-		Path folder = localCopies.resolve(worldId);
+		Path folder = folders.of(worldId);
 		return LocalCopyRecord.read(folder).map(record -> new LocalCopy(folder, record.revision(), record.pendingUpload()));
 	}
 
@@ -239,17 +150,11 @@ public final class SessionCoordinator {
 	 * session still open in this game.
 	 */
 	public List<String> pendingUploads() throws IOException {
-		if (!Files.isDirectory(localCopies)) return List.of();
-		try (Stream<Path> folders = Files.list(localCopies)) {
-			return folders.map(folder -> folder.getFileName().toString())
-					.filter(worldId -> !worldId.startsWith(STAGING_PREFIX) && hasUnsavedProgress(worldId))
-					.sorted()
-					.toList();
-		}
+		return folders.worldIds().stream().filter(this::hasUnsavedProgress).toList();
 	}
 
 	private boolean hasUnsavedProgress(String worldId) {
-		return LocalCopyRecord.read(localCopies.resolve(worldId)).map(LocalCopyRecord::hasUnsavedProgress).orElse(false);
+		return LocalCopyRecord.read(folders.of(worldId)).map(LocalCopyRecord::hasUnsavedProgress).orElse(false);
 	}
 
 	private boolean hasPendingUpload(String worldId) {
@@ -266,9 +171,8 @@ public final class SessionCoordinator {
 	 * @param name        the name everyone sees on the Shared Worlds screen
 	 */
 	public SharedWorld share(Path worldFolder, String name, ProgressListener progress) throws IOException {
-		Files.createDirectories(localCopies);
-		Path staging = Files.createTempDirectory(localCopies, STAGING_PREFIX);
-		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
+		Path staging = folders.newStagingFolder();
+		Path zip = folders.newStagingZip();
 		try {
 			// Copy first, then zip the copy, so the upload and the Local Copy are the same world (apart
 			// from the Local-only Data, which only the Local Copy gets).
@@ -280,8 +184,8 @@ public final class SessionCoordinator {
 			warnIfNearlyFull(size);
 			return shared;
 		} finally {
-			deleteLeftover(zip);
-			deleteLeftover(staging);
+			LocalCopyFolders.deleteLeftover(zip);
+			LocalCopyFolders.deleteLeftover(staging);
 		}
 	}
 
@@ -294,7 +198,7 @@ public final class SessionCoordinator {
 			cloud.uploadCurrentSave(world.id(), zip, metadata, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
 
 			new LocalCopyRecord(metadata.revision()).write(staging);
-			Files.move(staging, localCopies.resolve(world.id()));
+			Files.move(staging, folders.of(world.id()));
 			shared = true;
 			return sharedWorld(world, metadata, WorldStatus.FREE);
 		} finally {
@@ -452,7 +356,7 @@ public final class SessionCoordinator {
 	 * Backup.
 	 */
 	private void giveUpHosting(String worldId) throws IOException {
-		Path folder = localCopies.resolve(worldId);
+		Path folder = folders.of(worldId);
 		Optional<LocalCopyRecord> record = LocalCopyRecord.read(folder);
 		if (record.isPresent() && record.get().hasUnsavedProgress() && !cloudMovedPast(worldId, record.get())) {
 			record.get().withPendingUpload(true).write(folder);
@@ -518,7 +422,7 @@ public final class SessionCoordinator {
 	private Optional<Backup> bringLocalCopyUpToDate(String worldId, ProgressListener progress) throws IOException {
 		WorldMetadata current = cloud.readMetadata(worldId)
 				.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-		Path folder = localCopies.resolve(worldId);
+		Path folder = folders.of(worldId);
 		Optional<LocalCopyRecord> record = LocalCopyRecord.read(folder).map(local -> local.confirmedBy(current));
 		if (record.isPresent() && record.get().revision() >= current.revision()) {
 			record.get().write(folder);
@@ -536,8 +440,8 @@ public final class SessionCoordinator {
 	 * unsaved progress, so a failed download afterwards doesn't make a second Unmerged Backup.
 	 */
 	private Backup keepAsUnmergedBackup(String worldId, LocalCopyRecord record, ProgressListener progress) throws IOException {
-		Path folder = localCopies.resolve(worldId);
-		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
+		Path folder = folders.of(worldId);
+		Path zip = folders.newStagingZip();
 		try {
 			WorldZip.zip(folder, zip, progress);
 			long size = Files.size(zip);
@@ -551,7 +455,7 @@ public final class SessionCoordinator {
 			warnIfNearlyFull(size);
 			return backup;
 		} finally {
-			deleteLeftover(zip);
+			LocalCopyFolders.deleteLeftover(zip);
 		}
 	}
 
@@ -560,7 +464,7 @@ public final class SessionCoordinator {
 	 * it. A session resumed after a crash keeps the crashed session's start.
 	 */
 	private void markSessionOpen(String worldId, Instant startedAt) throws IOException {
-		Path folder = localCopies.resolve(worldId);
+		Path folder = folders.of(worldId);
 		LocalCopyRecord record = LocalCopyRecord.read(folder).orElseThrow(() -> new IOException("No Local Copy of " + worldId));
 		if (record.sessionStartedAt().isPresent()) return;
 		record.withSessionStartedAt(Optional.of(startedAt)).write(folder);
@@ -572,19 +476,18 @@ public final class SessionCoordinator {
 	 * old copy's Local-only Data is carried into the new one.
 	 */
 	private void download(String worldId, WorldMetadata current, ProgressListener progress) throws IOException {
-		Files.createDirectories(localCopies);
-		Path staging = Files.createTempDirectory(localCopies, STAGING_PREFIX);
-		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
+		Path staging = folders.newStagingFolder();
+		Path zip = folders.newStagingZip();
 		try {
 			cloud.downloadCurrentSave(worldId, zip, (done, total) -> progress.onProgress(ProgressListener.Step.DOWNLOADING, done, total));
 			WorldZip.unzip(zip, staging, progress);
 			new LocalCopyRecord(current.revision()).write(staging);
-			Path folder = localCopies.resolve(worldId);
+			Path folder = folders.of(worldId);
 			LocalOnlyData.carryOver(folder, staging);
-			swapIn(staging, folder);
+			folders.swapIn(staging, folder);
 		} finally {
-			deleteLeftover(zip);
-			deleteLeftover(staging);
+			LocalCopyFolders.deleteLeftover(zip);
+			LocalCopyFolders.deleteLeftover(staging);
 		}
 	}
 
@@ -598,7 +501,7 @@ public final class SessionCoordinator {
 		// The session this Play opened is over with nothing to upload. A crashed session it resumed
 		// started before this Lock, and still holds unsaved progress, so that one stays open.
 		Optional<Lock> mine = cloud.readLocks(worldId).stream().filter(lock -> lock.heldBy(me)).findFirst();
-		Path folder = localCopies.resolve(worldId);
+		Path folder = folders.of(worldId);
 		Optional<LocalCopyRecord> record = LocalCopyRecord.read(folder);
 		if (mine.isPresent() && record.isPresent() && record.get().sessionStartedAt().equals(Optional.of(mine.get().startedAt()))) {
 			record.get().withSessionStartedAt(Optional.empty()).write(folder);
@@ -658,7 +561,7 @@ public final class SessionCoordinator {
 	 * Taken Over and given up), this player takes it again for the upload.
 	 */
 	public RetryResult retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
-		Path folder = localCopies.resolve(worldId);
+		Path folder = folders.of(worldId);
 		LocalCopyRecord record = LocalCopyRecord.read(folder).filter(LocalCopyRecord::hasUnsavedProgress)
 				.orElseThrow(() -> new IOException("No Pending Upload of " + worldId + " on this computer"));
 		if (!record.pendingUpload()) {
@@ -692,7 +595,7 @@ public final class SessionCoordinator {
 	 * so no room is needed for it.
 	 */
 	private RetryResult finishStoredUpload(String worldId, WorldMetadata current) throws IOException {
-		new LocalCopyRecord(current.revision()).write(localCopies.resolve(worldId));
+		new LocalCopyRecord(current.revision()).write(folders.of(worldId));
 		pruneBackups(worldId);
 		releaseLockOrRetryLater(worldId);
 		try {
@@ -738,15 +641,14 @@ public final class SessionCoordinator {
 	 * @return the new Current Save's metadata
 	 */
 	public WorldMetadata periodicUpload(String worldId, OpenWorldCopier copier, ProgressListener progress) throws IOException {
-		Files.createDirectories(localCopies);
-		Path folder = Files.createTempDirectory(localCopies, STAGING_PREFIX);
+		Path folder = folders.newStagingFolder();
 		try {
 			copier.copyTo(folder);
 			Uploaded uploaded = upload(worldId, folder, false, progress);
 			warnIfNearlyFull(uploaded.size());
 			return uploaded.current();
 		} finally {
-			deleteLeftover(folder);
+			LocalCopyFolders.deleteLeftover(folder);
 		}
 	}
 
@@ -767,14 +669,13 @@ public final class SessionCoordinator {
 	 * @throws NotEnoughSpaceException if it doesn't fit in the account's free space
 	 */
 	private Uploaded upload(String worldId, Path worldFolder, boolean endsSession, ProgressListener progress) throws IOException {
-		Files.createDirectories(localCopies);
-		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
+		Path zip = folders.newStagingZip();
 		try {
 			String contents = WorldZip.zip(worldFolder, zip, progress);
 			long size = Files.size(zip);
 			WorldMetadata previous = cloud.readMetadata(worldId)
 					.orElseThrow(() -> new IOException("Shared World " + worldId + " has no Current Save"));
-			Path localFolder = localCopies.resolve(worldId);
+			Path localFolder = folders.of(worldId);
 			Optional<LocalCopyRecord> local = LocalCopyRecord.read(localFolder).map(record -> record.confirmedBy(previous));
 			ensureStillHost(worldId, previous, local);
 
@@ -794,7 +695,7 @@ public final class SessionCoordinator {
 			pruneBackups(worldId);
 			return new Uploaded(next, size);
 		} finally {
-			deleteLeftover(zip);
+			LocalCopyFolders.deleteLeftover(zip);
 		}
 	}
 
@@ -960,91 +861,5 @@ public final class SessionCoordinator {
 
 	private static SharedWorld sharedWorld(CloudWorld world, WorldMetadata metadata, WorldStatus status, boolean pendingUpload) {
 		return new SharedWorld(world.id(), world.name(), metadata.revision(), metadata.savedAt(), status, pendingUpload);
-	}
-
-	/**
-	 * Puts {@code newCopy} where the Local Copy at {@code folder} is. The old one is moved aside
-	 * first, put back if the new one can't be moved in, and deleted only once the new one is in
-	 * place, so a failure never loses it. If it is left behind, a later launch puts it back or
-	 * deletes it (see {@link #recoverLocalCopiesAndDeleteLeftovers}), so it must hold no unsaved
-	 * progress by now.
-	 */
-	private void swapIn(Path newCopy, Path folder) throws IOException {
-		Path aside = Files.createTempDirectory(localCopies, ASIDE_PREFIX);
-		// Named by its world, so that it can still be put back after a crash.
-		Path old = aside.resolve(folder.getFileName());
-		boolean swapped = false;
-		try {
-			synchronized (LocalCopyRecord.class) { // not while a listing reads the old record
-				boolean replacing = Files.exists(folder);
-				if (replacing) mover.move(folder, old);
-				try {
-					mover.move(newCopy, folder);
-				} catch (IOException | RuntimeException e) {
-					if (replacing) putBack(old, folder, e);
-					throw e;
-				}
-				swapped = true;
-			}
-		} finally {
-			// After a failed swap, a copy still in there is the only old one.
-			if (swapped && Files.exists(old)) discard(old);
-			else if (Files.notExists(old)) deleteLeftover(aside);
-		}
-	}
-
-	private void putBack(Path old, Path folder, Exception failure) {
-		try {
-			mover.move(old, folder);
-		} catch (IOException e) {
-			LOGGER.log(System.Logger.Level.ERROR, "Couldn't put the Local Copy back; it is in " + old, e);
-			failure.addSuppressed(e);
-		}
-	}
-
-	/**
-	 * Deletes a moved-aside copy that is no longer wanted. It is renamed first, so that one only
-	 * partly deleted is never put back, and the next launch finishes deleting it. Best effort.
-	 */
-	private void discard(Path copy) {
-		Path trash = localCopies.resolve(TRASH_PREFIX + UUID.randomUUID());
-		try {
-			mover.move(copy, trash);
-		} catch (IOException | RuntimeException e) {
-			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + copy, e);
-			return;
-		}
-		deleteLeftover(trash);
-		deleteIfEmpty(copy.getParent());
-	}
-
-	/** Deletes a folder if there is nothing in it. Best effort, as {@link #deleteLeftover}. */
-	private static void deleteIfEmpty(Path folder) {
-		try {
-			Files.delete(folder);
-		} catch (DirectoryNotEmptyException e) {
-			// Kept: the next launch looks at it again.
-		} catch (IOException e) {
-			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + folder, e);
-		}
-	}
-
-	/**
-	 * Deletes a {@code .wgds-*} folder or zip, if it is there. Best effort: nothing depends on it, so a
-	 * failure only leaves it for the next launch.
-	 */
-	private static void deleteLeftover(Path leftover) {
-		try {
-			deleteRecursively(leftover);
-		} catch (IOException | UncheckedIOException e) {
-			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + leftover, e);
-		}
-	}
-
-	private static void deleteRecursively(Path folder) throws IOException {
-		if (!Files.exists(folder)) return;
-		try (Stream<Path> walk = Files.walk(folder)) {
-			for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
-		}
 	}
 }
