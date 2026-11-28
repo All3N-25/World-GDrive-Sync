@@ -16,6 +16,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.dropped;
 import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.rateLimited;
@@ -25,6 +27,7 @@ import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.storageFull;
 import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.stored;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** A resumable upload on a bad connection: it resumes where Drive left off, and always ends. */
 @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
@@ -97,6 +100,31 @@ class ResumableUploadTest {
 		assertEquals(10, refused.needed());
 		assertEquals(1, fake.puts.size());
 		assertEquals(List.of(), pauses);
+	}
+
+	@Test
+	void interruptingAStalledChunkEndsTheUploadAtOnce() throws Exception {
+		fake.otherwise = fake.stalled();
+
+		assertInterruptEndsTheUpload();
+	}
+
+	@Test
+	void interruptingAStalledSignInRenewalEndsTheUploadAtOnce() throws Exception {
+		fake.tokenStalls = true;
+
+		assertInterruptEndsTheUpload();
+	}
+
+	/** Starts an upload that stalls, interrupts it, and expects it to end well before any time-out. */
+	private void assertInterruptEndsTheUpload() throws Exception {
+		CompletableFuture<Throwable> ended = new CompletableFuture<>();
+		Thread uploading = Thread.ofPlatform().daemon().start(() -> ended.complete(assertThrows(IOException.class, this::upload)));
+		assertTrue(fake.stalling.await(5, TimeUnit.SECONDS));
+
+		uploading.interrupt();
+
+		ended.get(5, TimeUnit.SECONDS);
 	}
 
 	@Test

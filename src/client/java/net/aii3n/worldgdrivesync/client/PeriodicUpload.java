@@ -56,9 +56,8 @@ final class PeriodicUpload {
 		// False from the moment save-and-quit halts the server.
 		BooleanSupplier hosted = () -> server.isRunning() && worldId.equals(HostingSession.hostedWorldId());
 		OpenWorldCopier copier = WhileHosted.copier(server, hosted, SAVE_TIMEOUT, folder -> saveWorldInto(server, folder));
-		SharedWorlds.get().run(coordinator -> coordinator.periodicUploadDue(worldId)
-				? coordinator.periodicUpload(worldId, copier, WhileHosted.progress(hosted, ProgressListener.NONE))
-				: null
+		SharedWorlds.get().run(coordinator -> WhileHosted.upload(hosted, ProgressListener.NONE,
+				progress -> coordinator.periodicUploadDue(worldId) ? coordinator.periodicUpload(worldId, copier, progress) : null)
 		).whenCompleteAsync((WorldMetadata uploaded, Throwable error) -> {
 			inFlight = false;
 			if (error != null) {

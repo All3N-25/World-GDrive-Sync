@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -90,9 +91,13 @@ public final class GoogleAccount {
 		params.put("grant_type", "refresh_token");
 		HttpResponse<String> response;
 		try {
-			response = postForm(endpoints.token(), params).join();
-		} catch (CompletionException e) {
+			// get, not join: a periodic upload that is given up is interrupted, and mustn't wait this out.
+			response = postForm(endpoints.token(), params).get();
+		} catch (ExecutionException e) {
 			throw new GoogleAuthException("Couldn't reach Google", e.getCause());
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new GoogleAuthException("Interrupted while renewing access", e);
 		}
 		JsonObject json = parseJson(response.body());
 		if ("invalid_grant".equals(string(json, "error"))) {
