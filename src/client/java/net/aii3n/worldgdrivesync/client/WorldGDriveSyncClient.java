@@ -5,6 +5,12 @@ import net.fabricmc.api.ClientModInitializer;
 public class WorldGDriveSyncClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
-		// This entrypoint is suitable for setting up client-specific logic, such as rendering.
+		GoogleConnection.init();
+		SharedWorlds.init();
+		TitleScreenButton.register();
+		HostingSession.register();
+		Heartbeats.register();
+		PendingUploadRetry.register();
+		PeriodicUpload.register();
 	}
 }
