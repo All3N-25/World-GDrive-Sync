@@ -172,6 +172,27 @@ class StorageSpaceTest {
 	}
 
 	@Test
+	void aShareTheCloudStoreCantMakeAFolderForSaysWhichWorldDidntFit() {
+		cloud.refuseNewFilesAsFull();
+
+		NotEnoughSpaceException refused = assertThrows(NotEnoughSpaceException.class,
+				() -> coordinator.share(saves, "Survival", ProgressListener.NONE));
+
+		assertEquals("Survival", refused.worldName());
+		assertTrue(refused.needed() > 0);
+	}
+
+	@Test
+	void aLockThatCantBeWrittenForWantOfRoomSaysTheStorageIsFull() throws Exception {
+		String worldId = coordinator.share(saves, "Survival", ProgressListener.NONE).id();
+		cloud.refuseNewFilesAsFull();
+
+		IOException refused = assertThrows(IOException.class, () -> coordinator.play(worldId, ProgressListener.NONE));
+
+		assertTrue(StorageFullException.in(refused).isPresent());
+	}
+
+	@Test
 	void theAccountIsNearlyFullExactlyWhenItCantTakeTwiceTheSize() {
 		assertEquals(OptionalLong.empty(), new StorageQuota(OptionalLong.of(300), 100).freeSpaceIfNearlyFull(100));
 		assertEquals(OptionalLong.of(199), new StorageQuota(OptionalLong.of(299), 100).freeSpaceIfNearlyFull(100));

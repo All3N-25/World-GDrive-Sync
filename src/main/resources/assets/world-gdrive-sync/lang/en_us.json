@@ -84,6 +84,7 @@
 	"world-gdrive-sync.settings.staleTimeout.tooltip": "A Host whose game hasn't checked in for this long shows as Stale, and friends can Take Over.",
 	"world-gdrive-sync.noSpace": "Not enough Google Drive space to upload %s: needs %s, %s free. Free up space in Google Drive, then try again.",
 	"world-gdrive-sync.noSpace.unknownFree": "Not enough Google Drive space to upload %s: needs %s. Free up space in Google Drive, then try again.",
+	"world-gdrive-sync.storageFull": "Not enough Google Drive space. Free up space in Google Drive, then try again.",
 	"world-gdrive-sync.noSpace.title": "Not Enough Space",
 	"world-gdrive-sync.upload.noSpace": "%s You still hold the Lock, and your progress is a Pending Upload on this computer.",
 	"world-gdrive-sync.retry.noSpace": "%s Your progress is still a Pending Upload on this computer.",

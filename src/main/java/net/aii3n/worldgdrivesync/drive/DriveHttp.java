@@ -6,6 +6,7 @@ import net.aii3n.worldgdrivesync.google.GoogleAccount;
 import net.aii3n.worldgdrivesync.google.GoogleAuthException;
 import net.aii3n.worldgdrivesync.session.CloudStore.BytesProgress;
 import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
+import net.aii3n.worldgdrivesync.session.StorageFullException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileNotFoundException;
@@ -30,7 +31,8 @@ import java.util.function.LongConsumer;
  * on a 401), retries with backoff on rate limits, server errors and dropped connections, resumable
  * uploads and streamed downloads. Knows nothing about the mod's files; {@link DriveCloudStore} does.
  *
- * <p>A 404 is reported as a {@link FileNotFoundException}; any other failure as an IOException.
+ * <p>A 404 is reported as a {@link FileNotFoundException}, a refusal for want of storage as a
+ * {@link StorageFullException} (not retried); any other failure as an IOException.
  */
 final class DriveHttp {
 	static final String API = "https://www.googleapis.com/drive/v3";
@@ -183,15 +185,8 @@ final class DriveHttp {
 			URI session = started.headers().firstValue("Location").map(URI::create)
 					.orElseThrow(() -> new IOException("Drive didn't start the upload"));
 			return new ResumableUpload(session, zip, size, bytesSent).run();
-		} catch (StorageFull e) {
+		} catch (StorageFullException e) {
 			throw new NotEnoughSpaceException(size, e);
-		}
-	}
-
-	/** Drive's refusal to store anything more: the account's storage quota is used up. */
-	private static final class StorageFull extends IOException {
-		StorageFull(String message) {
-			super(message);
 		}
 	}
 
@@ -308,7 +303,7 @@ final class DriveHttp {
 						continue;
 					}
 					if (status == 404 || status == 410) throw new IOException("Drive dropped the upload; try again");
-					if (storageFull(status, response)) throw new StorageFull("Drive refused the upload: " + describe(response));
+					if (storageFull(status, response)) throw new StorageFullException(new IOException("Drive refused the upload: " + describe(response)));
 					IOException refused = new IOException("Drive refused the upload: " + describe(response));
 					if (!retryable(status, response)) throw refused;
 					backOffOrGiveUp(++failures, refused);
@@ -400,7 +395,7 @@ final class DriveHttp {
 			}
 			if (status == 404) throw new FileNotFoundException("Google Drive error: " + describe(response));
 			if (status == 409) throw new IdTaken("Google Drive error: " + describe(response));
-			if (storageFull(status, response)) throw new StorageFull("Google Drive error: " + describe(response));
+			if (storageFull(status, response)) throw new StorageFullException(new IOException("Google Drive error: " + describe(response)));
 			throw new IOException("Google Drive error: " + describe(response));
 		}
 	}
