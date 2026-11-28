@@ -1,7 +1,9 @@
 package net.aii3n.worldgdrivesync.client;
 
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
+import net.aii3n.worldgdrivesync.session.OpenWorldCopier;
 import net.aii3n.worldgdrivesync.session.ProgressListener;
+import net.aii3n.worldgdrivesync.session.WhileHosted;
 import net.aii3n.worldgdrivesync.session.WorldMetadata;
 import net.aii3n.worldgdrivesync.session.WorldZip;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -10,13 +12,10 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 
 /**
  * Uploads the hosted Shared World now and then while it is being played. Once a minute (wall clock,
@@ -24,12 +23,13 @@ import java.util.concurrent.TimeoutException;
  * upload is due; if so the integrated server saves the world and copies it on its own thread (a
  * brief hitch, but a consistent copy), and the copy is zipped and uploaded on the network thread.
  * Nobody is kicked and the Lock stays held. A failed upload is logged and retried a few minutes
- * later; the final upload on save-and-quit happens regardless.
+ * later; the final upload on save-and-quit happens regardless. Once the world closes, an unfinished
+ * periodic upload is given up (see {@link WhileHosted}) so the final upload needn't wait for it.
  */
 final class PeriodicUpload {
 	private static final Duration CHECK_EVERY = Duration.ofMinutes(1);
 	private static final Duration RETRY_AFTER_FAILURE = Duration.ofMinutes(5);
-	private static final long SAVE_TIMEOUT_MINUTES = 2;
+	private static final Duration SAVE_TIMEOUT = Duration.ofMinutes(2);
 
 	// Client thread only.
 	private static Instant nextCheck = Instant.MIN;
@@ -52,8 +52,11 @@ final class PeriodicUpload {
 		nextCheck = now.plus(CHECK_EVERY);
 		inFlight = true;
 
+		// False from the moment save-and-quit halts the server.
+		BooleanSupplier hosted = () -> server.isRunning() && worldId.equals(HostingSession.hostedWorldId());
+		OpenWorldCopier copier = WhileHosted.copier(server, hosted, SAVE_TIMEOUT, folder -> saveWorldInto(server, folder));
 		SharedWorlds.get().run(coordinator -> coordinator.periodicUploadDue(worldId)
-				? coordinator.periodicUpload(worldId, folder -> copyOpenWorld(server, worldId, folder), ProgressListener.NONE)
+				? coordinator.periodicUpload(worldId, copier, WhileHosted.progress(hosted, ProgressListener.NONE))
 				: null
 		).whenCompleteAsync((WorldMetadata uploaded, Throwable error) -> {
 			inFlight = false;
@@ -66,29 +69,9 @@ final class PeriodicUpload {
 		}, minecraft);
 	}
 
-	/** Network thread: has the server thread save the world and copy it into {@code folder}, and waits. */
-	private static void copyOpenWorld(MinecraftServer server, String worldId, Path folder) throws IOException {
-		try {
-			server.submit(() -> {
-				if (!server.isRunning() || !worldId.equals(HostingSession.hostedWorldId())) {
-					throw new UncheckedIOException(new IOException("The world closed before it could be saved"));
-				}
-				server.saveEverything(true, true, true);
-				try {
-					WorldZip.copyForUpload(server.getWorldPath(LevelResource.ROOT), folder);
-				} catch (IOException e) {
-					throw new UncheckedIOException(e);
-				}
-				return null;
-			}).get(SAVE_TIMEOUT_MINUTES, TimeUnit.MINUTES);
-		} catch (ExecutionException e) {
-			if (e.getCause() instanceof UncheckedIOException unchecked) throw unchecked.getCause();
-			throw new IOException("Couldn't save the world for upload", e.getCause());
-		} catch (TimeoutException e) {
-			throw new IOException("The world didn't save in time for upload", e);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-			throw new IOException("Interrupted while saving the world for upload", e);
-		}
+	/** Server thread. */
+	private static void saveWorldInto(MinecraftServer server, Path folder) throws IOException {
+		server.saveEverything(true, true, true);
+		WorldZip.copyForUpload(server.getWorldPath(LevelResource.ROOT), folder);
 	}
 }
