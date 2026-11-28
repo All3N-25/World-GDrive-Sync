@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.TreeMap;
 import java.util.function.LongConsumer;
 import java.util.zip.ZipEntry;
@@ -34,6 +35,10 @@ final class InMemoryCloudStore implements CloudStore {
 	private boolean failLockWrites;
 	private boolean dropConnectionAfterNextReplace;
 	private boolean storeNextLockTwice;
+	private StorageQuota quota = new StorageQuota(OptionalLong.empty(), 0);
+	private boolean failQuotaReads;
+	private boolean refuseUploadsAsFull;
+	private int worldsCreated;
 	private final Map<Call, Hook> hooks = new EnumMap<>(Call.class);
 
 	/** Cloud calls a test can step into with {@link #beforeNext}. */
@@ -115,6 +120,7 @@ final class InMemoryCloudStore implements CloudStore {
 	@Override
 	public synchronized CloudWorld createWorld(String name) {
 		String id = "world-" + nextId++;
+		worldsCreated++;
 		worlds.put(id, new Folder(name));
 		return new CloudWorld(id, name);
 	}
@@ -201,6 +207,7 @@ final class InMemoryCloudStore implements CloudStore {
 	/** "Sends" a zip in small chunks, failing partway when uploads are set to fail. */
 	private byte[] send(Path zip, LongConsumer bytesSent) throws IOException {
 		byte[] bytes = Files.readAllBytes(zip);
+		if (refuseUploadsAsFull) throw new NotEnoughSpaceException(bytes.length, null);
 		for (int sent = 0; sent < bytes.length; ) {
 			if (failUploads) throw new IOException("Network down (simulated)");
 			sent = Math.min(bytes.length, sent + CHUNK);
@@ -280,7 +287,39 @@ final class InMemoryCloudStore implements CloudStore {
 		return oldest.isPresent();
 	}
 
+	@Override
+	public synchronized StorageQuota storageQuota() throws IOException {
+		if (failQuotaReads) throw new IOException("Network down (simulated)");
+		return quota;
+	}
+
+	@Override
+	public synchronized long currentSaveSize(String worldId) throws IOException {
+		byte[] zip = folder(worldId).currentSave;
+		return zip == null ? 0 : zip.length;
+	}
+
 	// --- Test controls and inspection ---
+
+	/** The account has a storage limit with this much of it left, however much is stored here. */
+	synchronized void setFreeSpace(long bytes) {
+		quota = new StorageQuota(OptionalLong.of(bytes), 0);
+	}
+
+	/** From now on reading the storage quota fails, like a dropped connection. */
+	synchronized void failQuotaReads() {
+		failQuotaReads = true;
+	}
+
+	/** From now on every upload is refused for want of room, as by a full Drive. */
+	synchronized void refuseUploadsAsFull() {
+		refuseUploadsAsFull = true;
+	}
+
+	/** How many world folders were ever made, deleted ones included. */
+	synchronized int worldsCreated() {
+		return worldsCreated;
+	}
 
 	/** From now on every upload fails partway, like a dropped connection. */
 	void failUploads() {

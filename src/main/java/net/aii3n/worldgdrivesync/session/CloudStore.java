@@ -14,6 +14,9 @@ import java.util.function.LongConsumer;
  * <p>Every call blocks and may be slow, so callers run the coordinator off the render thread.
  */
 public interface CloudStore {
+	/** How much the account may hold and how much it holds now. */
+	StorageQuota storageQuota() throws IOException;
+
 	/** Every Shared World folder on the account, including ones whose sharing never finished. */
 	List<CloudWorld> listWorlds() throws IOException;
 
@@ -32,6 +35,9 @@ public interface CloudStore {
 	 * when the call that made it current failed afterwards.
 	 */
 	Optional<WorldMetadata> readMetadata(String worldId) throws IOException;
+
+	/** The size in bytes of the Current Save's zip; 0 if the world has no Current Save yet. */
+	long currentSaveSize(String worldId) throws IOException;
 
 	/**
 	 * Stores {@code zip} as the world's first Current Save, carrying {@code metadata}.

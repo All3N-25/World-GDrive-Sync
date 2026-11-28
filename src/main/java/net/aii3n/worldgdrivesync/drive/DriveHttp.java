@@ -5,6 +5,7 @@ import com.google.gson.JsonParser;
 import net.aii3n.worldgdrivesync.google.GoogleAccount;
 import net.aii3n.worldgdrivesync.google.GoogleAuthException;
 import net.aii3n.worldgdrivesync.session.CloudStore.BytesProgress;
+import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileNotFoundException;
@@ -119,17 +120,29 @@ final class DriveHttp {
 	 * failure. Drive creates the file only once the upload completes.
 	 *
 	 * @return Drive's answer for the finished file (its {@code id})
+	 * @throws NotEnoughSpaceException if Drive refuses it because its storage is full; not retried
 	 */
 	JsonObject uploadNewFile(JsonObject metadata, Path zip, LongConsumer bytesSent) throws IOException {
 		long size = Files.size(zip);
-		HttpResponse<byte[]> started = send(token -> authorized(uploadApi + "/files?uploadType=resumable&fields=id", token)
-				.header("Content-Type", "application/json; charset=UTF-8")
-				.header("X-Upload-Content-Type", "application/zip")
-				.header("X-Upload-Content-Length", Long.toString(size))
-				.POST(HttpRequest.BodyPublishers.ofString(metadata.toString())));
-		URI session = started.headers().firstValue("Location").map(URI::create)
-				.orElseThrow(() -> new IOException("Drive didn't start the upload"));
-		return new ResumableUpload(session, zip, size, bytesSent).run();
+		try {
+			HttpResponse<byte[]> started = send(token -> authorized(uploadApi + "/files?uploadType=resumable&fields=id", token)
+					.header("Content-Type", "application/json; charset=UTF-8")
+					.header("X-Upload-Content-Type", "application/zip")
+					.header("X-Upload-Content-Length", Long.toString(size))
+					.POST(HttpRequest.BodyPublishers.ofString(metadata.toString())));
+			URI session = started.headers().firstValue("Location").map(URI::create)
+					.orElseThrow(() -> new IOException("Drive didn't start the upload"));
+			return new ResumableUpload(session, zip, size, bytesSent).run();
+		} catch (StorageFull e) {
+			throw new NotEnoughSpaceException(size, e);
+		}
+	}
+
+	/** Drive's refusal to store anything more: the account's storage quota is used up. */
+	private static final class StorageFull extends IOException {
+		StorageFull(String message) {
+			super(message);
+		}
 	}
 
 	/** Streams a large file to {@code target}, reporting bytes as they arrive; retried from the start on failure. */
@@ -245,6 +258,7 @@ final class DriveHttp {
 						continue;
 					}
 					if (status == 404 || status == 410) throw new IOException("Drive dropped the upload; try again");
+					if (storageFull(status, response)) throw new StorageFull("Drive refused the upload: " + describe(response));
 					IOException refused = new IOException("Drive refused the upload: " + describe(response));
 					if (!retryable(status, response)) throw refused;
 					backOffOrGiveUp(++failures, refused);
@@ -335,6 +349,7 @@ final class DriveHttp {
 				continue;
 			}
 			if (status == 404) throw new FileNotFoundException("Google Drive error: " + describe(response));
+			if (storageFull(status, response)) throw new StorageFull("Google Drive error: " + describe(response));
 			throw new IOException("Google Drive error: " + describe(response));
 		}
 	}
@@ -356,6 +371,10 @@ final class DriveHttp {
 		if (status != 403) return false;
 		String body = new String(response.body(), StandardCharsets.UTF_8);
 		return body.contains("rateLimitExceeded") || body.contains("userRateLimitExceeded");
+	}
+
+	private static boolean storageFull(int status, HttpResponse<byte[]> response) {
+		return status == 403 && new String(response.body(), StandardCharsets.UTF_8).contains("storageQuotaExceeded");
 	}
 
 	private void backOff(int attempt) throws IOException {
