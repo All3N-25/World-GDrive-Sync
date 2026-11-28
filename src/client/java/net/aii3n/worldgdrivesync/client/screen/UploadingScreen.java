@@ -35,6 +35,11 @@ public class UploadingScreen extends CoordinatorProgressScreen<Void> {
 	}
 
 	@Override
+	protected Component notEnoughSpaceMessage(Component notEnoughSpace) {
+		return Component.translatable("world-gdrive-sync.upload.noSpace", notEnoughSpace);
+	}
+
+	@Override
 	protected Screen afterFailure() {
 		return next;
 	}

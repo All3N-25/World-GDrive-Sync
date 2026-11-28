@@ -10,14 +10,13 @@ import net.aii3n.worldgdrivesync.session.LaunchRetry;
 import net.aii3n.worldgdrivesync.session.Player;
 import net.aii3n.worldgdrivesync.session.SessionClock;
 import net.aii3n.worldgdrivesync.session.SessionCoordinator;
-import net.aii3n.worldgdrivesync.session.SharedWorld;
+import net.aii3n.worldgdrivesync.session.SharedWorldListing;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.User;
 import net.fabricmc.loader.api.FabricLoader;
 import org.jspecify.annotations.Nullable;
 
 import java.nio.file.Path;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.Supplier;
@@ -48,9 +47,12 @@ public final class SharedWorlds {
 				FabricLoader.getInstance().getConfigDir().resolve(WorldGDriveSync.MOD_ID).resolve("settings.properties"));
 		// Built on first use: the signed-in Minecraft profile isn't guaranteed to exist during mod init.
 		instance = new SharedWorlds(Suppliers.memoize(() -> {
-			User user = Minecraft.getInstance().getUser();
-			return new SessionCoordinator(new DriveCloudStore(GoogleConnection.get().account()), SessionClock.system(),
+			Minecraft minecraft = Minecraft.getInstance();
+			User user = minecraft.getUser();
+			SessionCoordinator created = new SessionCoordinator(new DriveCloudStore(GoogleConnection.get().account()), SessionClock.system(),
 					localCopies, new Player(user.getProfileId().toString(), user.getName()), settings::current);
+			created.whenNearlyFull(free -> minecraft.execute(() -> StorageMessages.showNearlyFullToast(minecraft, free)));
+			return created;
 		}), settings);
 	}
 
@@ -77,9 +79,12 @@ public final class SharedWorlds {
 		return runner.run(task);
 	}
 
-	/** Every Shared World with its status. Never waits behind {@link #run} tasks such as uploads. */
-	public CompletableFuture<List<SharedWorld>> listSharedWorlds() {
-		return runner.listSharedWorlds();
+	/**
+	 * Every Shared World with its status, and whether Google Drive is nearly full. Never waits behind
+	 * {@link #run} tasks such as uploads.
+	 */
+	public CompletableFuture<SharedWorldListing> sharedWorldListing() {
+		return runner.sharedWorldListing();
 	}
 
 	/** How far the launch retry of Pending Uploads has got; safe to read on the render thread. */

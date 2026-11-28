@@ -43,6 +43,11 @@ public class RetryUploadScreen extends CoordinatorProgressScreen<RetryResult> {
 	}
 
 	@Override
+	protected Component notEnoughSpaceMessage(Component notEnoughSpace) {
+		return Component.translatable("world-gdrive-sync.retry.noSpace", notEnoughSpace);
+	}
+
+	@Override
 	protected Screen afterFailure() {
 		return lastScreen;
 	}

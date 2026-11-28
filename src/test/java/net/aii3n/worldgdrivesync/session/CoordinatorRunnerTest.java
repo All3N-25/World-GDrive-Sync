@@ -34,7 +34,7 @@ class CoordinatorRunnerTest {
 			upload = runner.run(c -> c.quit(shared.id(), ProgressListener.NONE));
 			blocked.awaitStarted();
 
-			List<SharedWorld> listed = runner.listSharedWorlds().get(5, TimeUnit.SECONDS);
+			List<SharedWorld> listed = runner.sharedWorldListing().get(5, TimeUnit.SECONDS).worlds();
 
 			assertEquals(List.of("Survival"), listed.stream().map(SharedWorld::name).toList());
 			assertEquals(1, listed.getFirst().revision());

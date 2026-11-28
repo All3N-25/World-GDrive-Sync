@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A stand-in for Drive's resumable-upload endpoint (and the token endpoint it needs), running on
@@ -29,12 +30,21 @@ final class FakeDriveUploads implements AutoCloseable {
 	volatile Answer otherwise = status(400);
 	/** The {@code Content-Range} of every PUT to the upload session, in order. */
 	final List<String> puts = new CopyOnWriteArrayList<>();
+	/** How many times an upload session has been asked for. */
+	final AtomicInteger starts = new AtomicInteger();
+	/** Set to answer the request for an upload session with this instead of starting one. */
+	volatile Answer refusesToStart;
 
 	FakeDriveUploads() throws IOException {
 		server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
 		server.createContext("/token", exchange -> respond(exchange, 200, "{\"access_token\":\"access\",\"expires_in\":3599}"));
 		server.createContext("/upload/files", exchange -> {
 			exchange.getRequestBody().readAllBytes();
+			starts.incrementAndGet();
+			if (refusesToStart != null) {
+				refusesToStart.send(exchange);
+				return;
+			}
 			exchange.getResponseHeaders().set("Location", base() + "/session");
 			respond(exchange, 200, "{}");
 		});
@@ -89,6 +99,12 @@ final class FakeDriveUploads implements AutoCloseable {
 	/** Drive asking the client to slow down, which it does with a 403. */
 	static Answer rateLimited() {
 		return exchange -> respond(exchange, 403, "{\"error\":{\"errors\":[{\"reason\":\"rateLimitExceeded\"}]}}");
+	}
+
+	/** The account is full, which Drive also says with a 403. */
+	static Answer storageFull() {
+		return exchange -> respond(exchange, 403, "{\"error\":{\"errors\":[{\"reason\":\"storageQuotaExceeded\"}],"
+				+ "\"code\":403,\"message\":\"The user's Drive storage quota has been exceeded.\"}}");
 	}
 
 	private static void respond(HttpExchange exchange, int status, String body) throws IOException {

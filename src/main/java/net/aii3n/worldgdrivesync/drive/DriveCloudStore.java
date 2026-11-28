@@ -12,6 +12,7 @@ import net.aii3n.worldgdrivesync.session.CloudStore;
 import net.aii3n.worldgdrivesync.session.CloudWorld;
 import net.aii3n.worldgdrivesync.session.CrashedSession;
 import net.aii3n.worldgdrivesync.session.Lock;
+import net.aii3n.worldgdrivesync.session.StorageQuota;
 import net.aii3n.worldgdrivesync.session.WorldMetadata;
 
 import java.io.FileNotFoundException;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.LongConsumer;
 
 /**
@@ -58,6 +60,24 @@ public final class DriveCloudStore implements CloudStore {
 
 	public DriveCloudStore(GoogleAccount account) {
 		this.drive = new DriveHttp(account);
+	}
+
+	/** {@code about.get}, which the {@code drive.file} permission allows; {@code fields} is required. */
+	@Override
+	public StorageQuota storageQuota() throws IOException {
+		return storageQuota(drive.getJson(API + "/about?fields=storageQuota"));
+	}
+
+	/** Reads {@code about.get}'s answer: bytes as strings, and no {@code limit} for unlimited storage. */
+	static StorageQuota storageQuota(JsonObject about) throws IOException {
+		try {
+			JsonObject quota = about.getAsJsonObject("storageQuota");
+			String limit = string(quota, "limit");
+			return new StorageQuota(limit == null ? OptionalLong.empty() : OptionalLong.of(Long.parseLong(limit)),
+					Long.parseLong(string(quota, "usage")));
+		} catch (RuntimeException e) {
+			throw new IOException("Unreadable storage quota from Google Drive", e);
+		}
 	}
 
 	@Override
@@ -127,6 +147,17 @@ public final class DriveCloudStore implements CloudStore {
 			return Optional.of(new WorldMetadata(Integer.parseInt(string(properties, "r")), Instant.parse(string(properties, "s"))));
 		} catch (RuntimeException e) {
 			return Optional.empty();
+		}
+	}
+
+	@Override
+	public long currentSaveSize(String worldId) throws IOException {
+		Optional<JsonObject> current = currentSave(worldId);
+		if (current.isEmpty()) return 0;
+		try {
+			return Long.parseLong(string(current.get(), "size"));
+		} catch (RuntimeException e) {
+			throw new IOException("Drive didn't say how large the Current Save of world " + worldId + " is", e);
 		}
 	}
 
@@ -413,7 +444,7 @@ public final class DriveCloudStore implements CloudStore {
 		String pageToken = null;
 		do {
 			String url = API + "/files?spaces=drive&pageSize=1000&orderBy=createdTime"
-					+ "&fields=" + enc("nextPageToken,files(id,name,createdTime,appProperties)")
+					+ "&fields=" + enc("nextPageToken,files(id,name,createdTime,appProperties,size)")
 					+ "&q=" + enc(query)
 					+ (pageToken == null ? "" : "&pageToken=" + enc(pageToken));
 			JsonObject page = drive.getJson(url);

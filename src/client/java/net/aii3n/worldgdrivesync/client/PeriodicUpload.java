@@ -1,6 +1,7 @@
 package net.aii3n.worldgdrivesync.client;
 
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
+import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
 import net.aii3n.worldgdrivesync.session.OpenWorldCopier;
 import net.aii3n.worldgdrivesync.session.ProgressListener;
 import net.aii3n.worldgdrivesync.session.WhileHosted;
@@ -63,6 +64,7 @@ final class PeriodicUpload {
 			if (error != null) {
 				WorldGDriveSync.LOGGER.warn("Periodic upload of Shared World {} failed: {}", worldId, SharedWorlds.describe(error), error);
 				nextCheck = Instant.now().plus(RETRY_AFTER_FAILURE);
+				NotEnoughSpaceException.in(error).ifPresent(refused -> StorageMessages.showNotEnoughSpaceToast(minecraft, refused));
 			} else if (uploaded != null) {
 				WorldGDriveSync.LOGGER.info("Periodic upload of Shared World {} done: Revision {}", worldId, uploaded.revision());
 			}

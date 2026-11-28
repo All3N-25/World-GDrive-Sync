@@ -2,6 +2,7 @@ package net.aii3n.worldgdrivesync.client.screen;
 
 import net.aii3n.worldgdrivesync.client.GoogleConnection;
 import net.aii3n.worldgdrivesync.client.SharedWorlds;
+import net.aii3n.worldgdrivesync.client.StorageMessages;
 import net.aii3n.worldgdrivesync.session.LaunchRetry;
 import net.aii3n.worldgdrivesync.session.SharedWorld;
 import net.aii3n.worldgdrivesync.session.WorldStatus;
@@ -11,6 +12,7 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.ObjectSelectionList;
+import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.layouts.HeaderAndFooterLayout;
@@ -26,6 +28,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.Consumer;
 
 /**
@@ -48,6 +51,8 @@ public class SharedWorldsScreen extends Screen {
 	/** Null while loading. */
 	private @Nullable List<SharedWorld> worlds;
 	private @Nullable String loadError;
+	/** Google Drive's free space, if the list on screen found it nearly full. */
+	private OptionalLong nearlyFullFreeSpace = OptionalLong.empty();
 	private int loadRequest;
 	/** {@link LaunchRetry#endedCount} when the latest list was asked for. */
 	private long endedCountAtRequest;
@@ -70,6 +75,7 @@ public class SharedWorldsScreen extends Screen {
 		if (!GoogleConnection.get().account().isConnected()) return;
 		worlds = null;
 		loadError = null;
+		nearlyFullFreeSpace = OptionalLong.empty();
 		load();
 		if (minecraft != null && width > 0) rebuildWidgets();
 	}
@@ -79,14 +85,16 @@ public class SharedWorldsScreen extends Screen {
 		int request = ++loadRequest;
 		long endedCount = SharedWorlds.get().launchRetry().endedCount();
 		endedCountAtRequest = endedCount;
-		SharedWorlds.get().listSharedWorlds().whenCompleteAsync((result, error) -> {
+		SharedWorlds.get().sharedWorldListing().whenCompleteAsync((result, error) -> {
 			if (request != loadRequest) return;
 			if (error != null) {
 				loadError = SharedWorlds.describe(error);
+				nearlyFullFreeSpace = OptionalLong.empty();
 			} else {
 				loadError = null;
+				nearlyFullFreeSpace = result.nearlyFullFreeSpace();
 				endedCountOfList = endedCount;
-				worlds = result.stream().sorted(Comparator.comparing(SharedWorld::name, String.CASE_INSENSITIVE_ORDER)).toList();
+				worlds = result.worlds().stream().sorted(Comparator.comparing(SharedWorld::name, String.CASE_INSENSITIVE_ORDER)).toList();
 			}
 			rebuildWidgets();
 		}, screenExecutor);
@@ -98,7 +106,7 @@ public class SharedWorldsScreen extends Screen {
 		String selectedId = list != null && list.getSelected() != null ? list.getSelected().world.id() : null;
 		layout.removeChildren();
 		list = null;
-		layout.addTitleHeader(TITLE, font);
+		addHeader();
 
 		if (!shownConnected) {
 			LinearLayout content = layout.addToContents(LinearLayout.vertical().spacing(8));
@@ -144,6 +152,19 @@ public class SharedWorldsScreen extends Screen {
 				.tooltip(Tooltip.create(Component.translatable("world-gdrive-sync.settings.title")))
 				.size(20, 20).build());
 		positionGear();
+	}
+
+	/** The title, with a warning line under it while Google Drive is nearly full. */
+	private void addHeader() {
+		if (nearlyFullFreeSpace.isEmpty()) {
+			layout.addTitleHeader(TITLE, font);
+			return;
+		}
+		LinearLayout header = layout.addToHeader(LinearLayout.vertical().spacing(4));
+		header.defaultCellSetting().alignHorizontallyCenter();
+		header.addChild(new StringWidget(TITLE, font));
+		header.addChild(new StringWidget(
+				StorageMessages.nearlyFull(nearlyFullFreeSpace.getAsLong()).copy().withStyle(ChatFormatting.YELLOW), font));
 	}
 
 	private MultiLineTextWidget text(Component message) {

@@ -16,9 +16,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -61,6 +63,9 @@ public final class SessionCoordinator {
 	 * deletes a Lock just taken again.
 	 */
 	private final Set<String> locksToRelease = ConcurrentHashMap.newKeySet();
+	/** See {@link #whenNearlyFull}. */
+	private volatile LongConsumer nearlyFullListener = free -> {
+	};
 
 	/** A coordinator with the default {@link Settings}. */
 	public SessionCoordinator(CloudStore cloud, SessionClock clock, Path localCopies, Player me) {
@@ -110,6 +115,29 @@ public final class SessionCoordinator {
 			result.add(sharedWorld(world, metadata.get(), status(world.id()), hasPendingUpload(world.id())));
 		}
 		return result;
+	}
+
+	/**
+	 * {@link #listSharedWorlds}, and whether the account is nearly full: its free space is less than
+	 * twice the size of the largest Current Save. If that can't be told, the worlds are listed
+	 * without the warning. Changes nothing, as {@link #listSharedWorlds}.
+	 */
+	public SharedWorldListing sharedWorldListing() throws IOException {
+		List<SharedWorld> worlds = listSharedWorlds();
+		return new SharedWorldListing(worlds, nearlyFullFreeSpace(worlds));
+	}
+
+	private OptionalLong nearlyFullFreeSpace(List<SharedWorld> worlds) {
+		try {
+			StorageQuota quota = cloud.storageQuota();
+			if (quota.limit().isEmpty()) return OptionalLong.empty(); // no need to ask for any sizes
+			long largest = 0;
+			for (SharedWorld world : worlds) largest = Math.max(largest, cloud.currentSaveSize(world.id()));
+			return quota.freeSpaceIfNearlyFull(largest);
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't check whether the account is nearly full", e);
+			return OptionalLong.empty();
+		}
 	}
 
 	/**
@@ -248,22 +276,96 @@ public final class SessionCoordinator {
 			WorldZip.zip(staging, zip, progress);
 			long size = Files.size(zip);
 
-			CloudWorld world = cloud.createWorld(name);
-			boolean shared = false;
-			try {
-				WorldMetadata metadata = new WorldMetadata(1, clock.instant());
-				cloud.uploadCurrentSave(world.id(), zip, metadata, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
-
-				new LocalCopyRecord(metadata.revision()).write(staging);
-				Files.move(staging, localCopies.resolve(world.id()));
-				shared = true;
-				return sharedWorld(world, metadata, WorldStatus.FREE);
-			} finally {
-				if (!shared) deleteUnsharedWorld(world.id());
-			}
+			SharedWorld shared = uploadIfItFits(() -> name, size, () -> uploadAsNewWorld(name, staging, zip, size, progress));
+			warnIfNearlyFull(size);
+			return shared;
 		} finally {
 			deleteLeftover(zip);
 			deleteLeftover(staging);
+		}
+	}
+
+	/** Uploads a world being shared into a new cloud folder, and makes {@code staging} its Local Copy. */
+	private SharedWorld uploadAsNewWorld(String name, Path staging, Path zip, long size, ProgressListener progress) throws IOException {
+		CloudWorld world = cloud.createWorld(name);
+		boolean shared = false;
+		try {
+			WorldMetadata metadata = new WorldMetadata(1, clock.instant());
+			cloud.uploadCurrentSave(world.id(), zip, metadata, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+
+			new LocalCopyRecord(metadata.revision()).write(staging);
+			Files.move(staging, localCopies.resolve(world.id()));
+			shared = true;
+			return sharedWorld(world, metadata, WorldStatus.FREE);
+		} finally {
+			if (!shared) deleteUnsharedWorld(world.id());
+		}
+	}
+
+	/** One upload of a zip to the cloud store, with whatever has to happen only if it may start. */
+	@FunctionalInterface
+	private interface Sending<T> {
+		T send() throws IOException;
+	}
+
+	/**
+	 * Runs {@code sending}, an upload of {@code size} bytes, unless the account's free space is
+	 * smaller than that: then nothing is sent and nothing in the cloud changes. If the free space
+	 * can't be read, the upload is tried and the cloud store's answer decides.
+	 *
+	 * @param worldName asked for only if the upload doesn't fit
+	 * @throws NotEnoughSpaceException if it doesn't fit, by this check or by the cloud store's refusal
+	 */
+	private <T> T uploadIfItFits(Supplier<String> worldName, long size, Sending<T> sending) throws IOException {
+		OptionalLong free = freeSpace();
+		if (free.isPresent() && size > free.getAsLong()) throw new NotEnoughSpaceException(worldName.get(), size, free, null);
+		try {
+			return sending.send();
+		} catch (NotEnoughSpaceException refused) {
+			// Filled up meanwhile. A free space the zip would fit in is out of date, so it isn't quoted.
+			OptionalLong now = freeSpace();
+			if (now.isPresent() && now.getAsLong() >= size) now = OptionalLong.empty();
+			throw new NotEnoughSpaceException(worldName.get(), size, now, refused);
+		}
+	}
+
+	/** The name everyone sees for a world, as well as it can be told, for a message about it. */
+	private String worldName(String worldId) {
+		try {
+			for (CloudWorld world : cloud.listWorlds()) {
+				if (world.id().equals(worldId)) return world.name();
+			}
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't read the name of " + worldId, e);
+		}
+		return worldId;
+	}
+
+	/**
+	 * Sets who is told when an upload succeeds but leaves the account nearly full: its free space,
+	 * in bytes, is less than twice the size of the zip just uploaded. {@code listener} is told that
+	 * free space, on the thread that did the upload.
+	 */
+	public void whenNearlyFull(LongConsumer listener) {
+		nearlyFullListener = listener;
+	}
+
+	/** Best effort: the upload has succeeded whatever happens here. */
+	private void warnIfNearlyFull(long uploadedSize) {
+		try {
+			cloud.storageQuota().freeSpaceIfNearlyFull(uploadedSize).ifPresent(nearlyFullListener);
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't check whether the account is nearly full", e);
+		}
+	}
+
+	/** The account's free space; empty if it is unlimited or can't be read. */
+	private OptionalLong freeSpace() {
+		try {
+			return cloud.storageQuota().freeSpace();
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't read the free space", e);
+			return OptionalLong.empty();
 		}
 	}
 
@@ -442,9 +544,11 @@ public final class SessionCoordinator {
 			Instant now = clock.instant();
 			CrashedSession session = new CrashedSession(me.id(), me.name(), record.sessionStartedAt().orElse(now));
 			BackupLabel label = new BackupLabel(record.revision(), now, Optional.of(session));
-			Backup backup = cloud.uploadBackup(worldId, zip, label, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+			Backup backup = uploadIfItFits(() -> worldName(worldId), size,
+					() -> cloud.uploadBackup(worldId, zip, label, sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size)));
 			new LocalCopyRecord(record.revision()).write(folder);
 			pruneBackups(worldId);
+			warnIfNearlyFull(size);
 			return backup;
 		} finally {
 			deleteLeftover(zip);
@@ -515,7 +619,7 @@ public final class SessionCoordinator {
 	 */
 	public WorldMetadata quit(String worldId, ProgressListener progress) throws IOException {
 		LocalCopy local = localCopy(worldId).orElseThrow(() -> new IOException("No Local Copy of " + worldId + " to upload"));
-		WorldMetadata uploaded;
+		Uploaded uploaded;
 		try {
 			uploaded = upload(worldId, local.folder(), true, progress);
 		} catch (IOException | RuntimeException e) {
@@ -523,7 +627,8 @@ public final class SessionCoordinator {
 			throw e;
 		}
 		releaseLockOrRetryLater(worldId);
-		return uploaded;
+		warnIfNearlyFull(uploaded.size());
+		return uploaded.current();
 	}
 
 	/** Releases the Lock once the progress it protected is in the cloud; a failure is retried by Heartbeats. */
@@ -617,10 +722,16 @@ public final class SessionCoordinator {
 		Path folder = Files.createTempDirectory(localCopies, STAGING_PREFIX);
 		try {
 			copier.copyTo(folder);
-			return upload(worldId, folder, false, progress);
+			Uploaded uploaded = upload(worldId, folder, false, progress);
+			warnIfNearlyFull(uploaded.size());
+			return uploaded.current();
 		} finally {
 			deleteLeftover(folder);
 		}
+	}
+
+	/** A new Current Save, and the size of its zip in bytes. */
+	private record Uploaded(WorldMetadata current, long size) {
 	}
 
 	/**
@@ -632,9 +743,10 @@ public final class SessionCoordinator {
 	 *                    Local Copy itself after the world has closed, or a copy of the open world
 	 * @param endsSession whether this is the session's final upload: the Local Copy then no longer
 	 *                    counts as having unsaved progress. A periodic upload leaves that as it is.
-	 * @return the new Current Save's metadata
+	 * @return the new Current Save
+	 * @throws NotEnoughSpaceException if it doesn't fit in the account's free space
 	 */
-	private WorldMetadata upload(String worldId, Path worldFolder, boolean endsSession, ProgressListener progress) throws IOException {
+	private Uploaded upload(String worldId, Path worldFolder, boolean endsSession, ProgressListener progress) throws IOException {
 		Files.createDirectories(localCopies);
 		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
 		try {
@@ -647,16 +759,18 @@ public final class SessionCoordinator {
 			ensureStillHost(worldId, previous, local);
 
 			WorldMetadata next = new WorldMetadata(previous.revision() + 1, clock.instant());
-			// Written before sending: the upload may be stored although its answer never arrives.
-			if (local.isPresent()) local.get().withSentUpload(Optional.of(next)).write(localFolder);
-			cloud.replaceCurrentSave(worldId, zip, next, BackupLabel.of(previous),
-					sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+			uploadIfItFits(() -> worldName(worldId), size, () -> {
+				// Written before sending: the upload may be stored although its answer never arrives.
+				if (local.isPresent()) local.get().withSentUpload(Optional.of(next)).write(localFolder);
+				return cloud.replaceCurrentSave(worldId, zip, next, BackupLabel.of(previous),
+						sent -> progress.onProgress(ProgressListener.Step.UPLOADING, sent, size));
+			});
 			LocalCopyRecord uploaded = LocalCopyRecord.read(localFolder).orElse(new LocalCopyRecord(next.revision()))
 					.withRevision(next.revision()).withPendingUpload(false).withSentUpload(Optional.empty());
 			if (endsSession) uploaded = uploaded.withSessionStartedAt(Optional.empty());
 			uploaded.write(localFolder);
 			pruneBackups(worldId);
-			return next;
+			return new Uploaded(next, size);
 		} finally {
 			deleteLeftover(zip);
 		}

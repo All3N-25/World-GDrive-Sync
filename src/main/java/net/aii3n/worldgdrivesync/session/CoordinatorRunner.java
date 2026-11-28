@@ -1,6 +1,5 @@
 package net.aii3n.worldgdrivesync.session;
 
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -26,11 +25,11 @@ public final class CoordinatorRunner {
 	}
 
 	/**
-	 * {@link SessionCoordinator#listSharedWorlds}, off the network thread: it never waits behind an
+	 * {@link SessionCoordinator#sharedWorldListing}, off the network thread: it never waits behind an
 	 * upload or any other {@link #run} task.
 	 */
-	public CompletableFuture<List<SharedWorld>> listSharedWorlds() {
-		return supply(SessionCoordinator::listSharedWorlds, listing);
+	public CompletableFuture<SharedWorldListing> sharedWorldListing() {
+		return supply(SessionCoordinator::sharedWorldListing, listing);
 	}
 
 	private <T> CompletableFuture<T> supply(CoordinatorTask<T> task, ExecutorService executor) {
