@@ -450,8 +450,8 @@ public final class SessionCoordinator {
 	 * an Unmerged Backup instead, this player's Lock is released if they still hold one, and the
 	 * Local Copy is replaced with the newer Revision. An upload of this Local Copy whose answer was
 	 * lost isn't someone else's: this uploads on top of it. If someone else holds the Lock but hasn't
-	 * uploaded yet, this throws and the Pending Upload is kept. If nobody holds the Lock (it was Taken Over and given up), this player takes it
-	 * again for the upload.
+	 * uploaded yet, this throws and the Pending Upload is kept. If nobody holds the Lock (it was
+	 * Taken Over and given up), this player takes it again for the upload.
 	 */
 	public RetryResult retryPendingUpload(String worldId, ProgressListener progress) throws IOException {
 		Path folder = localCopies.resolve(worldId);
