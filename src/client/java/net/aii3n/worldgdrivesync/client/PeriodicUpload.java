@@ -75,7 +75,7 @@ final class PeriodicUpload {
 				}
 				server.saveEverything(true, true, true);
 				try {
-					WorldZip.copy(server.getWorldPath(LevelResource.ROOT), folder);
+					WorldZip.copyForUpload(server.getWorldPath(LevelResource.ROOT), folder);
 				} catch (IOException e) {
 					throw new UncheckedIOException(e);
 				}

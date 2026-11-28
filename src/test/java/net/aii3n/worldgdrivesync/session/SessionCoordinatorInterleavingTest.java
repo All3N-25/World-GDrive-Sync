@@ -313,7 +313,7 @@ class SessionCoordinatorInterleavingTest {
 			Boolean due = attempt(sim, "checks if a periodic upload is due", () -> sim.game.periodicUploadDue(worldId));
 			if (Boolean.TRUE.equals(due) || random.nextInt(4) == 0) {
 				attempt(sim, "periodic upload", () -> sim.game.periodicUpload(worldId,
-						folder -> WorldZip.copy(localFolder(sim), folder), ProgressListener.NONE));
+						folder -> WorldZip.copyForUpload(localFolder(sim), folder), ProgressListener.NONE));
 			}
 		}
 

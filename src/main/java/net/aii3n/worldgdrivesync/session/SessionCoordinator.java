@@ -143,8 +143,9 @@ public final class SessionCoordinator {
 		Path staging = Files.createTempDirectory(localCopies, STAGING_PREFIX);
 		Path zip = Files.createTempFile(localCopies, STAGING_PREFIX, ".zip");
 		try {
-			// Copy first, then zip the copy, so the upload and the Local Copy are the same world.
-			WorldZip.copy(worldFolder, staging);
+			// Copy first, then zip the copy, so the upload and the Local Copy are the same world (apart
+			// from the Local-only Data, which only the Local Copy gets).
+			WorldZip.copyForLocalCopy(worldFolder, staging);
 			WorldZip.zip(staging, zip, progress);
 			long size = Files.size(zip);
 
@@ -339,7 +340,8 @@ public final class SessionCoordinator {
 
 	/**
 	 * Replaces the Local Copy with the Current Save. The new copy is unpacked beside the old one and
-	 * swapped in only once complete, so a failed download leaves the old Local Copy as it was.
+	 * swapped in only once complete, so a failed download leaves the old Local Copy as it was. The
+	 * old copy's Local-only Data is carried into the new one.
 	 */
 	private void download(String worldId, WorldMetadata current, ProgressListener progress) throws IOException {
 		Files.createDirectories(localCopies);
@@ -349,7 +351,9 @@ public final class SessionCoordinator {
 			cloud.downloadCurrentSave(worldId, zip, (done, total) -> progress.onProgress(ProgressListener.Step.DOWNLOADING, done, total));
 			WorldZip.unzip(zip, staging, progress);
 			new LocalCopyRecord(current.revision()).write(staging);
-			swapIn(staging, localCopies.resolve(worldId));
+			Path folder = localCopies.resolve(worldId);
+			LocalOnlyData.carryOver(folder, staging);
+			swapIn(staging, folder);
 		} finally {
 			Files.deleteIfExists(zip);
 			deleteRecursively(staging);

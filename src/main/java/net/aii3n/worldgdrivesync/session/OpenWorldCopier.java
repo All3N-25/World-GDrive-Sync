@@ -5,7 +5,7 @@ import java.nio.file.Path;
 
 /**
  * Copies a world that is open and still being played: saves it to disk, then copies the world
- * folder (with {@link WorldZip#copy}) into {@code folder} before the game writes to it again, so
+ * folder (with {@link WorldZip#copyForUpload}) into {@code folder} before the game writes to it again, so
  * the copy is consistent.
  */
 @FunctionalInterface

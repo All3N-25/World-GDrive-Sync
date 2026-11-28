@@ -23,6 +23,8 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import net.aii3n.worldgdrivesync.settings.Settings;
 
@@ -69,7 +71,7 @@ class SessionCoordinatorTest {
 		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
 		clock.advance(Duration.ofMinutes(30));
 		coordinator().heartbeat(shared.id());
-		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(local.folder(), folder), ProgressListener.NONE);
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copyForUpload(local.folder(), folder), ProgressListener.NONE);
 		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house and garden");
 		// Alice's game crashes and she relaunches it a minute later, before the Lock goes Stale.
 		clock.advance(Duration.ofMinutes(1));
@@ -98,7 +100,7 @@ class SessionCoordinatorTest {
 		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house");
 		clock.advance(Duration.ofMinutes(30));
 		coordinator().heartbeat(shared.id());
-		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(local.folder(), folder), ProgressListener.NONE);
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copyForUpload(local.folder(), folder), ProgressListener.NONE);
 		write(local.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house and garden");
 		// Alice closes the game window instead of Save and Quit, and starts it again later.
 		clock.advance(Duration.ofMinutes(3));
@@ -144,7 +146,7 @@ class SessionCoordinatorTest {
 		clock.advance(Duration.ofMinutes(30));
 		coordinator().heartbeat(shared.id());
 		// Revision 2 is in the cloud; then Alice builds more and her game crashes.
-		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(alices.folder(), folder), ProgressListener.NONE);
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copyForUpload(alices.folder(), folder), ProgressListener.NONE);
 		write(alices.folder().resolve("region/r.0.0.mca"), "chunks with Alice's house and tower");
 		clock.advance(Duration.ofMinutes(10));
 		SessionCoordinator bob = friend(bobsSharedsaves);
@@ -365,11 +367,11 @@ class SessionCoordinatorTest {
 		write(bobs.folder().resolve("region/r.0.0.mca"), "chunks with Bob's farm");
 		clock.advance(Duration.ofMinutes(30));
 		bob.heartbeat(shared.id());
-		bob.periodicUpload(shared.id(), folder -> WorldZip.copy(bobs.folder(), folder), ProgressListener.NONE);
+		bob.periodicUpload(shared.id(), folder -> WorldZip.copyForUpload(bobs.folder(), folder), ProgressListener.NONE);
 
 		// Alice's game wakes up and tries to upload, periodically and then on save and quit.
 		assertThrows(IOException.class, () -> coordinator().periodicUpload(shared.id(),
-				folder -> WorldZip.copy(alices.folder(), folder), ProgressListener.NONE));
+				folder -> WorldZip.copyForUpload(alices.folder(), folder), ProgressListener.NONE));
 		assertThrows(IOException.class, () -> coordinator().quit(shared.id(), ProgressListener.NONE));
 
 		assertEquals(2, cloud.metadata(shared.id()).revision());
@@ -1000,7 +1002,7 @@ class SessionCoordinatorTest {
 		assertTrue(coordinator().periodicUploadDue(shared.id()));
 		coordinator().heartbeat(shared.id()); // the game sends one every minute while hosting
 
-		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copy(local.folder(), folder), ProgressListener.NONE);
+		coordinator().periodicUpload(shared.id(), folder -> WorldZip.copyForUpload(local.folder(), folder), ProgressListener.NONE);
 
 		assertEquals("chunks with Alice's house", cloud.currentSaveEntries(shared.id()).get("region/r.0.0.mca"));
 		SharedWorld seenByBob = friend(bobsSharedsaves).listSharedWorlds().getFirst();
@@ -1170,6 +1172,153 @@ class SessionCoordinatorTest {
 
 		assertFalse(cloud.currentSaveEntries(shared.id()).containsKey("session.lock"));
 		assertFalse(Files.exists(coordinator().localCopy(shared.id()).orElseThrow().folder().resolve("session.lock")));
+	}
+
+	// --- Local-only Data ---
+
+	private static final String OVERWORLD_LODS = "dimensions/minecraft/overworld/data/DistantHorizons.sqlite";
+	private static final String NETHER_LODS = "dimensions/minecraft/the_nether/data/DistantHorizons.sqlite";
+
+	@Test
+	void sharingKeepsLocalOnlyDataInTheLocalCopyButNeverUploadsIt() throws Exception {
+		Path world = singleplayerWorld("Survival");
+		write(world.resolve(OVERWORLD_LODS), "overworld LODs");
+		write(world.resolve(OVERWORLD_LODS + "-wal"), "overworld journal");
+		write(world.resolve(NETHER_LODS), "nether LODs");
+		write(world.resolve("dimensions/minecraft/overworld/data/raids.dat"), "raids");
+
+		SharedWorld shared = coordinator().share(world, "Survival", ProgressListener.NONE);
+
+		assertEquals(Map.of(
+				"level.dat", "level data",
+				"region/r.0.0.mca", "chunks",
+				"dimensions/minecraft/overworld/data/raids.dat", "raids"), cloud.currentSaveEntries(shared.id()));
+		Path local = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		assertEquals("overworld LODs", Files.readString(local.resolve(OVERWORLD_LODS)));
+		assertEquals("overworld journal", Files.readString(local.resolve(OVERWORLD_LODS + "-wal")));
+		assertEquals("nether LODs", Files.readString(local.resolve(NETHER_LODS)));
+	}
+
+	@Test
+	void aPeriodicUploadNeitherCopiesNorUploadsLocalOnlyData() throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		LocalCopy local = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+		write(local.folder().resolve(OVERWORLD_LODS), "overworld LODs");
+		clock.advance(Duration.ofMinutes(20));
+
+		coordinator().periodicUpload(shared.id(), folder -> {
+			WorldZip.copyForUpload(local.folder(), folder);
+			assertFalse(Files.exists(folder.resolve(OVERWORLD_LODS)), "DH's open database is not even read");
+		}, ProgressListener.NONE);
+
+		assertFalse(cloud.currentSaveEntries(shared.id()).containsKey(OVERWORLD_LODS));
+	}
+
+	@Test
+	void downloadingANewerCurrentSaveKeepsThisPlayersLocalOnlyData(@TempDir Path bobsSharedsaves) throws Exception {
+		Path world = singleplayerWorld("Survival");
+		write(world.resolve(OVERWORLD_LODS), "Alice's overworld LODs");
+		write(world.resolve(OVERWORLD_LODS + "-wal"), "Alice's journal");
+		write(world.resolve(NETHER_LODS), "Alice's nether LODs");
+		SharedWorld shared = coordinator().share(world, "Survival", ProgressListener.NONE);
+		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
+
+		LocalCopy updated = ((PlayResult.Ready) coordinator().play(shared.id(), ProgressListener.NONE)).localCopy();
+
+		assertEquals("chunks with Bob's farm", Files.readString(updated.folder().resolve("region/r.0.0.mca")));
+		assertEquals("Alice's overworld LODs", Files.readString(updated.folder().resolve(OVERWORLD_LODS)));
+		assertEquals("Alice's journal", Files.readString(updated.folder().resolve(OVERWORLD_LODS + "-wal")));
+		assertEquals("Alice's nether LODs", Files.readString(updated.folder().resolve(NETHER_LODS)));
+	}
+
+	/** Current Saves uploaded before Local-only Data was left out still contain it. */
+	@Test
+	void localOnlyDataInADownloadedZipStaysWhereTheLocalCopyHasNone(@TempDir Path elsewhere) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		replaceCurrentSave(shared.id(), Map.of(OVERWORLD_LODS, "old upload's LODs", NETHER_LODS, "old upload's nether LODs"), elsewhere);
+		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		write(folder.resolve(NETHER_LODS), "Alice's nether LODs");
+
+		coordinator().play(shared.id(), ProgressListener.NONE);
+
+		assertEquals("old upload's LODs", Files.readString(folder.resolve(OVERWORLD_LODS)));
+		assertEquals("Alice's nether LODs", Files.readString(folder.resolve(NETHER_LODS)));
+	}
+
+	/** A journal only fits the database it was written for. */
+	@Test
+	void aDownloadedZipsJournalIsNotLeftBesideThisPlayersDatabase(@TempDir Path elsewhere) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		replaceCurrentSave(shared.id(), Map.of(OVERWORLD_LODS, "old upload's LODs", OVERWORLD_LODS + "-wal", "old upload's journal"), elsewhere);
+		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		write(folder.resolve(OVERWORLD_LODS), "Alice's overworld LODs");
+
+		coordinator().play(shared.id(), ProgressListener.NONE);
+
+		assertEquals("Alice's overworld LODs", Files.readString(folder.resolve(OVERWORLD_LODS)));
+		assertFalse(Files.exists(folder.resolve(OVERWORLD_LODS + "-wal")));
+	}
+
+	@Test
+	void aFailureCarryingLocalOnlyDataOverStillDownloadsAndKeepsTheRest(@TempDir Path elsewhere) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		// A file where the nether's folder would go, so its LODs can't be put in the new copy.
+		replaceCurrentSave(shared.id(), Map.of("dimensions/minecraft/the_nether", "in the way"), elsewhere);
+		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		write(folder.resolve(NETHER_LODS), "Alice's nether LODs");
+		write(folder.resolve(OVERWORLD_LODS), "Alice's overworld LODs");
+
+		PlayResult result = coordinator().play(shared.id(), ProgressListener.NONE);
+
+		assertEquals(2, assertInstanceOf(PlayResult.Ready.class, result).localCopy().revision());
+		assertEquals("in the way", Files.readString(folder.resolve("dimensions/minecraft/the_nether")));
+		assertEquals("Alice's overworld LODs", Files.readString(folder.resolve(OVERWORLD_LODS)));
+	}
+
+	@Test
+	void ifTheNewRevisionCannotBeMovedInTheLocalCopyKeepsItsLocalOnlyData(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		hostASession(friend(bobsSharedsaves), shared.id(), "chunks with Bob's farm");
+		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		write(folder.resolve(OVERWORLD_LODS), "Alice's overworld LODs");
+		AtomicBoolean failed = new AtomicBoolean();
+		SessionCoordinator alice = coordinatorMovingWith((from, to) -> {
+			if (to.equals(folder) && failed.compareAndSet(false, true)) throw new AccessDeniedException(to.toString());
+			Files.move(from, to);
+		});
+
+		assertThrows(AccessDeniedException.class, () -> alice.play(shared.id(), ProgressListener.NONE));
+
+		assertEquals("Alice's overworld LODs", Files.readString(folder.resolve(OVERWORLD_LODS)));
+	}
+
+	@Test
+	void anUnmergedBackupLeavesLocalOnlyDataOutAndTheNewLocalCopyKeepsIt(@TempDir Path bobsSharedsaves) throws Exception {
+		SharedWorld shared = coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE);
+		Path folder = coordinator().localCopy(shared.id()).orElseThrow().folder();
+		write(folder.resolve(OVERWORLD_LODS), "Alice's overworld LODs");
+		leaveAPendingUploadThenLetBobTakeOverAndUpload(shared.id(), bobsSharedsaves);
+
+		RetryResult result = coordinator().retryPendingUpload(shared.id(), ProgressListener.NONE);
+
+		Backup unmerged = assertInstanceOf(RetryResult.KeptAsUnmergedBackup.class, result).backup();
+		assertFalse(cloud.backupEntries(shared.id(), unmerged.id()).containsKey(OVERWORLD_LODS));
+		assertEquals("Alice's overworld LODs", Files.readString(folder.resolve(OVERWORLD_LODS)));
+	}
+
+	/** Makes a Current Save at the next Revision holding {@code files}, however the mod would zip them. */
+	private void replaceCurrentSave(String worldId, Map<String, String> files, Path elsewhere) throws IOException {
+		Path zip = elsewhere.resolve("current.zip");
+		try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(zip))) {
+			for (Map.Entry<String, String> file : files.entrySet()) {
+				out.putNextEntry(new ZipEntry(file.getKey()));
+				out.write(file.getValue().getBytes(StandardCharsets.UTF_8));
+				out.closeEntry();
+			}
+		}
+		WorldMetadata previous = cloud.metadata(worldId);
+		cloud.replaceCurrentSave(worldId, zip, new WorldMetadata(previous.revision() + 1, clock.instant()),
+				BackupLabel.of(previous), sent -> { });
 	}
 
 	// --- Backups ---

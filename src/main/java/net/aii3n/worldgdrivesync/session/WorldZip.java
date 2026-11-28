@@ -22,11 +22,20 @@ public final class WorldZip {
 	static final Set<String> SKIPPED = Set.of("session.lock", LocalCopyRecord.FILE_NAME);
 
 	/**
-	 * Copies a saved world folder, leaving out the open world's {@code session.lock} and the Local
-	 * Copy's own record, as every upload does.
+	 * Copies a saved world folder for an upload: leaves out what no upload contains, which is the
+	 * open world's {@code session.lock}, the Local Copy's own record and the Local-only Data.
 	 */
-	public static void copy(Path from, Path to) throws IOException {
-		for (Path file : worldFiles(from)) {
+	public static void copyForUpload(Path from, Path to) throws IOException {
+		copy(from, filesToUpload(from), to);
+	}
+
+	/** Copies a world folder to become a Local Copy: as {@link #copyForUpload}, plus the Local-only Data. */
+	static void copyForLocalCopy(Path from, Path to) throws IOException {
+		copy(from, worldFiles(from), to);
+	}
+
+	private static void copy(Path from, List<Path> files, Path to) throws IOException {
+		for (Path file : files) {
 			Path target = to.resolve(from.relativize(file).toString());
 			Files.createDirectories(target.getParent());
 			Files.copy(file, target);
@@ -42,11 +51,16 @@ public final class WorldZip {
 		}
 	}
 
+	private static List<Path> filesToUpload(Path worldFolder) throws IOException {
+		return worldFiles(worldFolder).stream().filter(file -> !LocalOnlyData.includes(file)).toList();
+	}
+
 	private WorldZip() {
 	}
 
+	/** Zips a world folder for an upload, leaving out the same files as {@link #copyForUpload}. */
 	static void zip(Path worldFolder, Path zipFile, ProgressListener progress) throws IOException {
-		List<Path> files = worldFiles(worldFolder);
+		List<Path> files = filesToUpload(worldFolder);
 		try (OutputStream out = Files.newOutputStream(zipFile); ZipOutputStream zip = new ZipOutputStream(out)) {
 			int done = 0;
 			for (Path file : files) {
