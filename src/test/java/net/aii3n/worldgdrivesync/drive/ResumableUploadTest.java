@@ -4,7 +4,7 @@ import com.google.gson.JsonObject;
 import net.aii3n.worldgdrivesync.google.GoogleAccount;
 import net.aii3n.worldgdrivesync.google.GoogleEndpoints;
 import net.aii3n.worldgdrivesync.google.OAuthClient;
-import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
+import net.aii3n.worldgdrivesync.session.StorageFullException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,6 +16,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.dropped;
 import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.rateLimited;
@@ -25,6 +27,7 @@ import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.storageFull;
 import static net.aii3n.worldgdrivesync.drive.FakeDriveUploads.stored;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** A resumable upload on a bad connection: it resumes where Drive left off, and always ends. */
 @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
@@ -44,7 +47,7 @@ class ResumableUploadTest {
 				"{\"refreshToken\":\"refresh\",\"accountEmail\":\"shared-worlds@example.com\"}");
 		GoogleEndpoints endpoints = new GoogleEndpoints(null, fake.tokenEndpoint(), null, null);
 		GoogleAccount account = new GoogleAccount(signIn, new OAuthClient("test-client-id", "test-client-secret"), endpoints);
-		drive = new DriveHttp(account, fake.uploadApi(), pauses::add);
+		drive = new DriveHttp(account, DriveHttp.API, fake.uploadApi(), pauses::add);
 	}
 
 	@AfterEach
@@ -78,25 +81,59 @@ class ResumableUploadTest {
 	}
 
 	@Test
-	void anUploadAFullDriveWontStartIsNotEnoughSpaceAndIsNotRetried() {
+	void anUploadAFullDriveWontStartSaysItIsFullAndIsNotRetried() {
 		fake.refusesToStart = storageFull();
 
-		NotEnoughSpaceException refused = assertThrows(NotEnoughSpaceException.class, this::upload);
+		assertThrows(StorageFullException.class, this::upload);
 
-		assertEquals(10, refused.needed());
 		assertEquals(1, fake.starts.get());
 		assertEquals(List.of(), pauses);
 	}
 
 	@Test
-	void anUploadTheDriveFillsUpUnderIsNotEnoughSpaceAndIsNotRetried() {
+	void anUploadTheDriveFillsUpUnderSaysItIsFullAndIsNotRetried() {
 		fake.otherwise = storageFull();
 
-		NotEnoughSpaceException refused = assertThrows(NotEnoughSpaceException.class, this::upload);
+		assertThrows(StorageFullException.class, this::upload);
 
-		assertEquals(10, refused.needed());
 		assertEquals(1, fake.puts.size());
 		assertEquals(List.of(), pauses);
+	}
+
+	@Test
+	void aFullDriveRefusingAnyOtherRequestSaysSoAndIsNotRetried() {
+		fake.refusesToStart = storageFull();
+
+		assertThrows(StorageFullException.class,
+				() -> drive.createSmallFile(new JsonObject(), "application/json", new byte[2]));
+
+		assertEquals(1, fake.starts.get());
+		assertEquals(List.of(), pauses);
+	}
+
+	@Test
+	void interruptingAStalledChunkEndsTheUploadAtOnce() throws Exception {
+		fake.otherwise = fake.stalled();
+
+		assertInterruptEndsTheUpload();
+	}
+
+	@Test
+	void interruptingAStalledSignInRenewalEndsTheUploadAtOnce() throws Exception {
+		fake.tokenStalls = true;
+
+		assertInterruptEndsTheUpload();
+	}
+
+	/** Starts an upload that stalls, interrupts it, and expects it to end well before any time-out. */
+	private void assertInterruptEndsTheUpload() throws Exception {
+		CompletableFuture<Throwable> ended = new CompletableFuture<>();
+		Thread uploading = Thread.ofPlatform().daemon().start(() -> ended.complete(assertThrows(IOException.class, this::upload)));
+		assertTrue(fake.stalling.await(5, TimeUnit.SECONDS));
+
+		uploading.interrupt();
+
+		ended.get(5, TimeUnit.SECONDS);
 	}
 
 	@Test

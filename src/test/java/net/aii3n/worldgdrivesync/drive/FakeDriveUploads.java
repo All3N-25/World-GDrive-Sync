@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -12,6 +13,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -35,9 +37,21 @@ final class FakeDriveUploads implements AutoCloseable {
 	/** Set to answer the request for an upload session with this instead of starting one. */
 	volatile Answer refusesToStart;
 
+	/** Set to never answer the request for an access token. */
+	volatile boolean tokenStalls;
+	/** Counted down once a request is being left unanswered. */
+	final CountDownLatch stalling = new CountDownLatch(1);
+	private final CountDownLatch closed = new CountDownLatch(1);
+
 	FakeDriveUploads() throws IOException {
 		server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
-		server.createContext("/token", exchange -> respond(exchange, 200, "{\"access_token\":\"access\",\"expires_in\":3599}"));
+		server.createContext("/token", exchange -> {
+			if (tokenStalls) {
+				stalled().send(exchange);
+				return;
+			}
+			respond(exchange, 200, "{\"access_token\":\"access\",\"expires_in\":3599}");
+		});
 		server.createContext("/upload/files", exchange -> {
 			exchange.getRequestBody().readAllBytes();
 			starts.incrementAndGet();
@@ -76,6 +90,19 @@ final class FakeDriveUploads implements AutoCloseable {
 	/** The connection drops before Drive answers. */
 	static Answer dropped() {
 		return HttpExchange::close;
+	}
+
+	/** Drive never answers, until the fake is closed. */
+	Answer stalled() {
+		return exchange -> {
+			stalling.countDown();
+			try {
+				closed.await();
+			} catch (InterruptedException e) {
+				throw new InterruptedIOException();
+			}
+			exchange.close();
+		};
 	}
 
 	/** "Resume Incomplete" with the first {@code bytes} bytes stored. */
@@ -117,6 +144,7 @@ final class FakeDriveUploads implements AutoCloseable {
 
 	@Override
 	public void close() {
+		closed.countDown();
 		server.stop(0);
 	}
 }

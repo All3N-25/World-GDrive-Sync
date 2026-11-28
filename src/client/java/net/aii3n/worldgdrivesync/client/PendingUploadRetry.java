@@ -1,18 +1,18 @@
 package net.aii3n.worldgdrivesync.client;
 
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
-import net.aii3n.worldgdrivesync.session.LaunchRetry;
+import net.aii3n.worldgdrivesync.session.LaunchTasks;
 import net.aii3n.worldgdrivesync.session.RetryResult;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 
 /**
  * Retries every Pending Upload on this computer once the game has started, so a Host whose final
- * upload failed, or whose game crashed or was closed while hosting, doesn't have to remember. Runs
- * the {@link LaunchRetry} on the network thread and logs it; a failed one stays on the Shared Worlds
- * screen with its Retry button.
+ * upload failed, or whose game crashed or was closed while hosting, doesn't have to remember. Queues
+ * the {@link LaunchTasks} and logs them; a failed retry stays on the Shared Worlds screen with its
+ * Retry button.
  */
 final class PendingUploadRetry {
-	private static final LaunchRetry.Report LOG = new LaunchRetry.Report() {
+	private static final LaunchTasks.Report LOG = new LaunchTasks.Report() {
 		@Override
 		public void started(String worldId) {
 			WorldGDriveSync.LOGGER.info("Retrying the Pending Upload of Shared World {}", worldId);
@@ -33,30 +33,23 @@ final class PendingUploadRetry {
 		public void failed(String worldId, Exception failure) {
 			WorldGDriveSync.LOGGER.warn("Retrying the Pending Upload of Shared World {} failed", worldId, failure);
 		}
+
+		@Override
+		public void cleanUpFailed(Throwable failure) {
+			WorldGDriveSync.LOGGER.warn("Couldn't clean up after earlier sessions in sharedsaves", failure);
+		}
+
+		@Override
+		public void retryFailed(Throwable failure) {
+			WorldGDriveSync.LOGGER.warn("Couldn't check for Pending Uploads", failure);
+		}
 	};
 
 	private PendingUploadRetry() {
 	}
 
 	static void register() {
-		ClientLifecycleEvents.CLIENT_STARTED.register(client -> {
-			// The network thread's first task, so it is over before anything there uses sharedsaves/,
-			// the retry included. Needs no account.
-			SharedWorlds.get().run(coordinator -> {
-				coordinator.recoverLocalCopiesAndDeleteLeftovers();
-				return null;
-			}).exceptionally(e -> {
-				WorldGDriveSync.LOGGER.warn("Couldn't clean up after earlier sessions in sharedsaves", e);
-				return null;
-			});
-			if (!GoogleConnection.get().account().isConnected()) return;
-			SharedWorlds.get().run(coordinator -> {
-				SharedWorlds.get().launchRetry().run(coordinator, LOG);
-				return null;
-			}).exceptionally(e -> {
-				WorldGDriveSync.LOGGER.warn("Couldn't check for Pending Uploads", e);
-				return null;
-			});
-		});
+		ClientLifecycleEvents.CLIENT_STARTED.register(client -> LaunchTasks.queue(SharedWorlds.get().runner(),
+				GoogleConnection.get().account().isConnected(), SharedWorlds.get().launchRetry(), LOG));
 	}
 }

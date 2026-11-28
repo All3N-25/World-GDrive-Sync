@@ -461,7 +461,7 @@ public final class DriveCloudStore implements CloudStore {
 		metadata.addProperty("mimeType", FOLDER);
 		if (parentId != null) metadata.add("parents", single(parentId));
 		metadata.add("appProperties", tag(type));
-		return drive.postJson(API + "/files?fields=id,name", metadata);
+		return drive.createOnce(metadata);
 	}
 
 	private void createSmallFile(String name, String parentId, JsonObject appProperties, String contentType, byte[] content) throws IOException {

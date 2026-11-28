@@ -11,7 +11,8 @@ import java.util.function.LongConsumer;
  * only stores and fetches. The game uses Google Drive ({@code drive.DriveCloudStore}); tests use an
  * in-memory store.
  *
- * <p>Every call blocks and may be slow, so callers run the coordinator off the render thread.
+ * <p>Every call blocks and may be slow, so callers run the coordinator off the render thread. Any
+ * call that writes throws {@link StorageFullException} if the account is too full for it.
  */
 public interface CloudStore {
 	/** How much the account may hold and how much it holds now. */
@@ -20,7 +21,10 @@ public interface CloudStore {
 	/** Every Shared World folder on the account, including ones whose sharing never finished. */
 	List<CloudWorld> listWorlds() throws IOException;
 
-	/** Makes a new, empty folder for one Shared World. */
+	/**
+	 * Makes a new, empty folder for one Shared World. Makes only one, however often the request is
+	 * sent, and if it fails, leaves none behind (best effort).
+	 */
 	CloudWorld createWorld(String name) throws IOException;
 
 	/** Deletes one Shared World folder and everything in it, for good. */

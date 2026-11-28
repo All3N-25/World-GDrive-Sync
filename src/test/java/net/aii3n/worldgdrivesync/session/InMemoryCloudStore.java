@@ -38,6 +38,7 @@ final class InMemoryCloudStore implements CloudStore {
 	private StorageQuota quota = new StorageQuota(OptionalLong.empty(), 0);
 	private boolean failQuotaReads;
 	private boolean refuseUploadsAsFull;
+	private boolean full;
 	private int worldsCreated;
 	private final Map<Call, Hook> hooks = new EnumMap<>(Call.class);
 
@@ -118,7 +119,8 @@ final class InMemoryCloudStore implements CloudStore {
 	}
 
 	@Override
-	public synchronized CloudWorld createWorld(String name) {
+	public synchronized CloudWorld createWorld(String name) throws StorageFullException {
+		if (full) throw new StorageFullException(null);
 		String id = "world-" + nextId++;
 		worldsCreated++;
 		worlds.put(id, new Folder(name));
@@ -207,7 +209,7 @@ final class InMemoryCloudStore implements CloudStore {
 	/** "Sends" a zip in small chunks, failing partway when uploads are set to fail. */
 	private byte[] send(Path zip, LongConsumer bytesSent) throws IOException {
 		byte[] bytes = Files.readAllBytes(zip);
-		if (refuseUploadsAsFull) throw new NotEnoughSpaceException(bytes.length, null);
+		if (refuseUploadsAsFull) throw new StorageFullException(null);
 		for (int sent = 0; sent < bytes.length; ) {
 			if (failUploads) throw new IOException("Network down (simulated)");
 			sent = Math.min(bytes.length, sent + CHUNK);
@@ -242,6 +244,7 @@ final class InMemoryCloudStore implements CloudStore {
 	public synchronized void writeLock(String worldId, Lock lock) throws IOException {
 		runHook(Call.LOCK_WRITE);
 		if (failLockWrites) throw new IOException("Network down (simulated)");
+		if (full) throw new StorageFullException(null);
 		List<Lock> locks = folder(worldId).locks;
 		if (replaceOldest(locks, lock)) return;
 		locks.add(lock);
@@ -314,6 +317,11 @@ final class InMemoryCloudStore implements CloudStore {
 	/** From now on every upload is refused for want of room, as by a full Drive. */
 	synchronized void refuseUploadsAsFull() {
 		refuseUploadsAsFull = true;
+	}
+
+	/** From now on nothing new can be stored: new folders and Locks are refused, as by a full Drive. */
+	synchronized void refuseNewFilesAsFull() {
+		full = true;
 	}
 
 	/** How many world folders were ever made, deleted ones included. */

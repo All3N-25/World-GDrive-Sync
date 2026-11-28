@@ -2,9 +2,12 @@ package net.aii3n.worldgdrivesync.client;
 
 import net.aii3n.worldgdrivesync.session.ByteSize;
 import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
+import net.aii3n.worldgdrivesync.session.StorageFullException;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.network.chat.Component;
+
+import java.util.Optional;
 
 /** What the player is told about the room left in Google Drive, on screens and in toasts. */
 public final class StorageMessages {
@@ -14,8 +17,16 @@ public final class StorageMessages {
 	private StorageMessages() {
 	}
 
-	/** Why an upload didn't fit, and what to do about it. */
-	public static Component notEnoughSpace(NotEnoughSpaceException refused) {
+	/**
+	 * What to tell the player if {@code failure} was for want of room in Google Drive: why, and what
+	 * to do about it. Empty for any other failure.
+	 */
+	public static Optional<Component> outOfSpace(Throwable failure) {
+		return NotEnoughSpaceException.in(failure).map(StorageMessages::notEnoughSpace)
+				.or(() -> StorageFullException.in(failure).map(full -> Component.translatable("world-gdrive-sync.storageFull")));
+	}
+
+	private static Component notEnoughSpace(NotEnoughSpaceException refused) {
 		String needed = ByteSize.format(refused.needed());
 		return refused.free().isPresent()
 				? Component.translatable("world-gdrive-sync.noSpace", refused.worldName(), needed, ByteSize.format(refused.free().getAsLong()))
@@ -28,9 +39,9 @@ public final class StorageMessages {
 	}
 
 	// Client thread.
-	static void showNotEnoughSpaceToast(Minecraft minecraft, NotEnoughSpaceException refused) {
+	static void showOutOfSpaceToast(Minecraft minecraft, Component message) {
 		SystemToast.addOrUpdate(minecraft.gui.toastManager(), NOT_ENOUGH_SPACE,
-				Component.translatable("world-gdrive-sync.noSpace.title"), notEnoughSpace(refused));
+				Component.translatable("world-gdrive-sync.noSpace.title"), message);
 	}
 
 	// Client thread.

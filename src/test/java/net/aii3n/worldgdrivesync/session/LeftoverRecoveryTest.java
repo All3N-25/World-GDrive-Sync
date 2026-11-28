@@ -296,7 +296,7 @@ class LeftoverRecoveryTest {
 		return new SessionCoordinator(cloud, clock, sharedsaves, ALICE);
 	}
 
-	private SessionCoordinator coordinatorMovingWith(SessionCoordinator.FolderMover mover) {
+	private SessionCoordinator coordinatorMovingWith(LocalCopyFolders.Mover mover) {
 		return new SessionCoordinator(cloud, clock, sharedsaves, ALICE, () -> Settings.DEFAULTS, mover);
 	}
 

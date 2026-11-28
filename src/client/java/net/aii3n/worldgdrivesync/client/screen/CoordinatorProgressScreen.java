@@ -3,7 +3,6 @@ package net.aii3n.worldgdrivesync.client.screen;
 import net.aii3n.worldgdrivesync.WorldGDriveSync;
 import net.aii3n.worldgdrivesync.client.SharedWorlds;
 import net.aii3n.worldgdrivesync.client.StorageMessages;
-import net.aii3n.worldgdrivesync.session.NotEnoughSpaceException;
 import net.aii3n.worldgdrivesync.session.ProgressListener;
 import net.aii3n.worldgdrivesync.session.SessionCoordinator;
 import net.minecraft.ChatFormatting;
@@ -51,7 +50,7 @@ public abstract class CoordinatorProgressScreen<T> extends Screen implements Pro
 	protected abstract Screen afterFailure();
 
 	/**
-	 * The message shown instead of {@link #failureMessage} when an upload didn't fit in Google Drive.
+	 * The message shown instead of {@link #failureMessage} when Google Drive had no room.
 	 *
 	 * @param notEnoughSpace says so, and what to do about it
 	 */
@@ -68,8 +67,8 @@ public abstract class CoordinatorProgressScreen<T> extends Screen implements Pro
 				onSuccess(result);
 			} else {
 				WorldGDriveSync.LOGGER.warn("{} failed", title.getString(), failure);
-				error = NotEnoughSpaceException.in(failure)
-						.map(refused -> notEnoughSpaceMessage(StorageMessages.notEnoughSpace(refused)))
+				error = StorageMessages.outOfSpace(failure)
+						.map(this::notEnoughSpaceMessage)
 						.orElseGet(() -> failureMessage(SharedWorlds.describe(failure)));
 				rebuildWidgets();
 			}
