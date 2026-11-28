@@ -3,15 +3,21 @@ package net.aii3n.worldgdrivesync.session;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
+import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -30,6 +36,12 @@ import net.aii3n.worldgdrivesync.settings.Settings;
  */
 public final class SessionCoordinator {
 	private static final String STAGING_PREFIX = ".wgds-";
+	/** A folder holding the Local Copy a swap moved aside, in a folder named by its world's id. */
+	private static final String ASIDE_PREFIX = STAGING_PREFIX + "aside-";
+	/** A moved-aside copy on its way to being deleted. */
+	private static final String TRASH_PREFIX = STAGING_PREFIX + "trash-";
+	/** Where swaps used to move the old copy, inside a {@code .wgds-*} folder: its world isn't known. */
+	private static final String UNKNOWN_WORLDS_COPY = "old";
 	/** How long to wait after writing a Lock for a simultaneous one to show up in the cloud store. */
 	private static final Duration LOCK_SETTLE_TIME = Duration.ofSeconds(3);
 	private static final System.Logger LOGGER = System.getLogger(SessionCoordinator.class.getName());
@@ -100,6 +112,91 @@ public final class SessionCoordinator {
 		return result;
 	}
 
+	/**
+	 * Tidies up what a crash or a failed delete left in the Local Copy directory. An old Local Copy
+	 * that a swap moved aside is put back if nothing is at its world's folder (the one with the
+	 * highest Revision, if there are several), and deleted once a Local Copy of its world is in
+	 * place. Every other {@code .wgds-*} folder and zip is deleted. A moved-aside copy is left as it
+	 * is if it has no readable record, if its world isn't known, or if something that isn't a Local
+	 * Copy is at its world's folder.
+	 *
+	 * <p>The game calls it on launch, on the thread that shares, uploads and downloads, before any of
+	 * those can be using a {@code .wgds-*} path. Works offline. Whatever can't be moved or deleted is
+	 * logged and left for the next launch.
+	 *
+	 * @throws IOException if the Local Copy directory can't be listed
+	 */
+	public void recoverLocalCopiesAndDeleteLeftovers() throws IOException {
+		if (!Files.isDirectory(localCopies)) return;
+		List<Path> leftovers;
+		try (Stream<Path> entries = Files.list(localCopies)) {
+			leftovers = entries.filter(entry -> entry.getFileName().toString().startsWith(STAGING_PREFIX)).toList();
+		}
+		Map<String, List<MovedAside>> movedAside = new HashMap<>();
+		for (Path leftover : leftovers) {
+			String name = leftover.getFileName().toString();
+			if (name.startsWith(ASIDE_PREFIX) && Files.isDirectory(leftover)) {
+				findMovedAside(leftover, movedAside);
+			} else if (name.startsWith(TRASH_PREFIX) || !Files.isDirectory(leftover.resolve(UNKNOWN_WORLDS_COPY))) {
+				deleteLeftover(leftover);
+			}
+		}
+		movedAside.forEach(this::restoreOrDiscard);
+	}
+
+	/** An old Local Copy a swap moved aside, with the Revision its record says it is. */
+	private record MovedAside(Path folder, int revision) {
+	}
+
+	/**
+	 * Adds the copies in a move-aside folder that have a readable record to {@code found}, by world
+	 * id. Deletes the folder if there is no copy in it at all.
+	 */
+	private static void findMovedAside(Path aside, Map<String, List<MovedAside>> found) {
+		List<Path> copies;
+		try (Stream<Path> entries = Files.list(aside)) {
+			copies = entries.filter(Files::isDirectory).toList();
+		} catch (IOException | UncheckedIOException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't look for an old Local Copy in " + aside, e);
+			return;
+		}
+		if (copies.isEmpty()) deleteLeftover(aside);
+		for (Path copy : copies) {
+			Optional<LocalCopyRecord> record = LocalCopyRecord.read(copy);
+			if (record.isEmpty()) {
+				LOGGER.log(System.Logger.Level.WARNING, "Keeping " + copy + ": it has no readable record");
+				continue;
+			}
+			found.computeIfAbsent(copy.getFileName().toString(), worldId -> new ArrayList<>())
+					.add(new MovedAside(copy, record.get().revision()));
+		}
+	}
+
+	/** Settles the moved-aside copies of one world: see {@link #recoverLocalCopiesAndDeleteLeftovers}. */
+	private void restoreOrDiscard(String worldId, List<MovedAside> copies) {
+		Path folder = localCopies.resolve(worldId);
+		List<MovedAside> spare = new ArrayList<>(copies);
+		if (Files.notExists(folder, LinkOption.NOFOLLOW_LINKS)) {
+			MovedAside newest = Collections.max(copies, Comparator.comparingInt(MovedAside::revision));
+			try {
+				synchronized (LocalCopyRecord.class) { // not while a listing reads the record
+					mover.move(newest.folder(), folder);
+				}
+			} catch (IOException | RuntimeException e) {
+				LOGGER.log(System.Logger.Level.WARNING, "Couldn't put the Local Copy back; it is in " + newest.folder(), e);
+				return;
+			}
+			LOGGER.log(System.Logger.Level.INFO, "Put the old Local Copy of " + worldId + " back");
+			deleteIfEmpty(newest.folder().getParent());
+			spare.remove(newest);
+		}
+		if (LocalCopyRecord.read(folder).isEmpty()) {
+			LOGGER.log(System.Logger.Level.WARNING, "Keeping the old Local Copy of " + worldId + ": " + folder + " isn't a Local Copy");
+			return;
+		}
+		spare.forEach(copy -> discard(copy.folder()));
+	}
+
 	/** This player's Local Copy of a Shared World, if they have one. */
 	public Optional<LocalCopy> localCopy(String worldId) {
 		Path folder = localCopies.resolve(worldId);
@@ -165,8 +262,8 @@ public final class SessionCoordinator {
 				if (!shared) deleteUnsharedWorld(world.id());
 			}
 		} finally {
-			Files.deleteIfExists(zip);
-			deleteRecursively(staging);
+			deleteLeftover(zip);
+			deleteLeftover(staging);
 		}
 	}
 
@@ -350,7 +447,7 @@ public final class SessionCoordinator {
 			pruneBackups(worldId);
 			return backup;
 		} finally {
-			Files.deleteIfExists(zip);
+			deleteLeftover(zip);
 		}
 	}
 
@@ -382,8 +479,8 @@ public final class SessionCoordinator {
 			LocalOnlyData.carryOver(folder, staging);
 			swapIn(staging, folder);
 		} finally {
-			Files.deleteIfExists(zip);
-			deleteRecursively(staging);
+			deleteLeftover(zip);
+			deleteLeftover(staging);
 		}
 	}
 
@@ -522,7 +619,7 @@ public final class SessionCoordinator {
 			copier.copyTo(folder);
 			return upload(worldId, folder, false, progress);
 		} finally {
-			deleteRecursively(folder);
+			deleteLeftover(folder);
 		}
 	}
 
@@ -561,7 +658,7 @@ public final class SessionCoordinator {
 			pruneBackups(worldId);
 			return next;
 		} finally {
-			Files.deleteIfExists(zip);
+			deleteLeftover(zip);
 		}
 	}
 
@@ -732,11 +829,14 @@ public final class SessionCoordinator {
 	/**
 	 * Puts {@code newCopy} where the Local Copy at {@code folder} is. The old one is moved aside
 	 * first, put back if the new one can't be moved in, and deleted only once the new one is in
-	 * place, so a failure never loses it.
+	 * place, so a failure never loses it. If it is left behind, a later launch puts it back or
+	 * deletes it (see {@link #recoverLocalCopiesAndDeleteLeftovers}), so it must hold no unsaved
+	 * progress by now.
 	 */
 	private void swapIn(Path newCopy, Path folder) throws IOException {
-		Path aside = Files.createTempDirectory(localCopies, STAGING_PREFIX);
-		Path old = aside.resolve("old");
+		Path aside = Files.createTempDirectory(localCopies, ASIDE_PREFIX);
+		// Named by its world, so that it can still be put back after a crash.
+		Path old = aside.resolve(folder.getFileName());
 		boolean swapped = false;
 		try {
 			synchronized (LocalCopyRecord.class) { // not while a listing reads the old record
@@ -751,8 +851,9 @@ public final class SessionCoordinator {
 				swapped = true;
 			}
 		} finally {
-			// After a failed swap, anything still in there is the only old copy.
-			if (swapped || Files.notExists(old)) deleteLeftover(aside);
+			// After a failed swap, a copy still in there is the only old one.
+			if (swapped && Files.exists(old)) discard(old);
+			else if (Files.notExists(old)) deleteLeftover(aside);
 		}
 	}
 
@@ -765,12 +866,42 @@ public final class SessionCoordinator {
 		}
 	}
 
-	/** Best effort: nothing depends on it, so a failure only leaves a folder behind. */
-	private static void deleteLeftover(Path folder) {
+	/**
+	 * Deletes a moved-aside copy that is no longer wanted. It is renamed first, so that one only
+	 * partly deleted is never put back, and the next launch finishes deleting it. Best effort.
+	 */
+	private void discard(Path copy) {
+		Path trash = localCopies.resolve(TRASH_PREFIX + UUID.randomUUID());
 		try {
-			deleteRecursively(folder);
-		} catch (IOException | UncheckedIOException e) {
+			mover.move(copy, trash);
+		} catch (IOException | RuntimeException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + copy, e);
+			return;
+		}
+		deleteLeftover(trash);
+		deleteIfEmpty(copy.getParent());
+	}
+
+	/** Deletes a folder if there is nothing in it. Best effort, as {@link #deleteLeftover}. */
+	private static void deleteIfEmpty(Path folder) {
+		try {
+			Files.delete(folder);
+		} catch (DirectoryNotEmptyException e) {
+			// Kept: the next launch looks at it again.
+		} catch (IOException e) {
 			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + folder, e);
+		}
+	}
+
+	/**
+	 * Deletes a {@code .wgds-*} folder or zip, if it is there. Best effort: nothing depends on it, so a
+	 * failure only leaves it for the next launch.
+	 */
+	private static void deleteLeftover(Path leftover) {
+		try {
+			deleteRecursively(leftover);
+		} catch (IOException | UncheckedIOException e) {
+			LOGGER.log(System.Logger.Level.WARNING, "Couldn't delete " + leftover, e);
 		}
 	}
 
