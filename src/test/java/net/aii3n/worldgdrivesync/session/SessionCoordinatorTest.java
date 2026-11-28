@@ -1150,6 +1150,36 @@ class SessionCoordinatorTest {
 	}
 
 	@Test
+	void aShareWhoseUploadFailsLeavesNoWorldInTheCloud() throws Exception {
+		cloud.failUploads();
+
+		assertThrows(IOException.class, () -> coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE));
+
+		assertEquals(0, cloud.worldCount());
+	}
+
+	@Test
+	void aShareThatCannotKeepItsLocalCopyLeavesNoWorldInTheCloud() throws Exception {
+		// Something already sits where the first cloud world's Local Copy would go.
+		write(sharedsaves.resolve("world-1/level.dat"), "in the way");
+
+		assertThrows(IOException.class, () -> coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE));
+
+		assertEquals(0, cloud.worldCount());
+	}
+
+	@Test
+	void aFailedCleanupDoesNotHideWhySharingFailed() throws Exception {
+		cloud.failUploads();
+		cloud.failWorldDeletes();
+
+		IOException failure = assertThrows(IOException.class,
+				() -> coordinator().share(singleplayerWorld("Survival"), "Survival", ProgressListener.NONE));
+
+		assertEquals("Network down (simulated)", failure.getMessage());
+	}
+
+	@Test
 	void sharingReportsUploadProgressUpToTheWholeZip() throws Exception {
 		List<long[]> uploading = new ArrayList<>();
 
