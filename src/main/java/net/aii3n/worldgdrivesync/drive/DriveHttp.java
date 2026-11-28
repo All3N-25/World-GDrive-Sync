@@ -408,13 +408,16 @@ final class DriveHttp {
 
 	private static boolean retryable(int status, HttpResponse<byte[]> response) {
 		if (retryable(status)) return true;
-		if (status != 403) return false;
-		String body = new String(response.body(), StandardCharsets.UTF_8);
-		return body.contains("rateLimitExceeded") || body.contains("userRateLimitExceeded");
+		return status == 403 && (bodyMentions(response, "rateLimitExceeded") || bodyMentions(response, "userRateLimitExceeded"));
 	}
 
 	private static boolean storageFull(int status, HttpResponse<byte[]> response) {
-		return status == 403 && new String(response.body(), StandardCharsets.UTF_8).contains("storageQuotaExceeded");
+		return status == 403 && bodyMentions(response, "storageQuotaExceeded");
+	}
+
+	/** Whether Drive's error answer names {@code reason}. */
+	private static boolean bodyMentions(HttpResponse<byte[]> response, String reason) {
+		return new String(response.body(), StandardCharsets.UTF_8).contains(reason);
 	}
 
 	private void backOff(int attempt) throws IOException {

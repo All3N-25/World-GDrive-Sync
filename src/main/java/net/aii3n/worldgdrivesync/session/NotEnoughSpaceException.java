@@ -11,9 +11,8 @@ public final class NotEnoughSpaceException extends IOException {
 	private final Long free;
 
 	NotEnoughSpaceException(String worldName, long needed, OptionalLong free, Throwable cause) {
-		super("Not enough Google Drive space to upload " + worldName + ": needs " + ByteSize.format(needed)
-				+ (free.isPresent() ? ", " + ByteSize.format(free.getAsLong()) + " free" : "")
-				+ ". Free up space in Google Drive, then try again.", cause);
+		// For the log. What the player is told is worded in the language file only.
+		super("No room for " + worldName + " (" + needed + " bytes, free: " + free + ")", cause);
 		this.worldName = worldName;
 		this.needed = needed;
 		this.free = free.isPresent() ? free.getAsLong() : null;
